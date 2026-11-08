@@ -1,0 +1,81 @@
+# KVET: checks on every push and pull request; deploy to Cloudflare Pages from main when everything passes.
+#
+# Deploying needs two repository secrets (Settings -> Secrets and variables -> Actions):
+#   CLOUDFLARE_API_TOKEN   a token with "Cloudflare Pages: Edit" permission
+#   CLOUDFLARE_ACCOUNT_ID  your account id (Cloudflare dashboard, right-hand column)
+# Without them the checks still run and the deploy step is skipped.
+# The database is NOT changed by this pipeline: run schema.sql in Supabase by hand when CHANGES.md says so, before
+# the push that needs it.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Type check, schema, unit and API tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - name: Type check (strict)
+        run: npm run typecheck
+      - name: schema.sql matches the record rules
+        run: node tools/gen-schema.mjs --check
+      - name: Tests (API, security, load, disaster recovery)
+        run: npm test
+      - name: Demo build
+        run: npm run build:demo
+
+  e2e:
+    name: End-to-end tests (Chromium)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      - run: npx playwright install --with-deps chromium
+      - run: npm run e2e
+
+  deploy:
+    name: Deploy to Cloudflare Pages
+    needs: [check, e2e]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: production
+    env:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Skip when Cloudflare secrets are not set
+        if: env.CLOUDFLARE_API_TOKEN == ''
+        run: |
+          echo "::notice::CLOUDFLARE_API_TOKEN is not set, so the deploy was skipped (checks passed)."
+      - name: Preload list
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: node tools/preload.mjs
+      - name: Deploy
+        if: env.CLOUDFLARE_API_TOKEN != ''
+        run: npx --yes wrangler@4 pages deploy public --project-name kvet-certificates --branch main

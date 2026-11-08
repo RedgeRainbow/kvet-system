@@ -1,0 +1,29 @@
+# Təlim günü, imtahan və sertifikat — iştirakçılar üçün suallar və cavablar
+
+Bu sənəd iştirakçılar üçün KVET portalından istifadə, təlim günü, imtahan və sertifikatlar barədədir (Trainee guide: training day, exam, certificate / Памятка слушателя: день обучения, экзамен, сертификат).
+
+Portala necə daxil olum? (How do I log in / Как войти в портал). İştirakçı portalına giriş üçün istifadəçi adı sizin iştirakçı nömrənizdir (məsələn, E-202600001), şifrəni isə təlim mərkəzi verir. Şifrəni unutmusunuzsa və ya daxil ola bilmirsinizsə, təlim mərkəzinə müraciət edin (+994 55 206 68 49, office@kvet.edu.az) — şifrəni yalnız mərkəz yeniləyə bilər. Portalda açıq qeydiyyat yoxdur; hesabları təlim mərkəzi yaradır.
+
+İştirak necə qeydə alınır? (Attendance / Как отмечается посещаемость). Davamiyyəti təlimçi təsdiqləyir: təlimçi sessiyanı seçir, gəlməyənləri qeyd edir və "İştirakı təsdiqlə" düyməsini basır; qalan hamı iştirakçı sayılır. İştirakçının özünün davamiyyəti təsdiqləməsinə ehtiyac yoxdur. İştirakınız təsdiqləndikdən sonra portalda "İştirakınız təsdiqləndi" yazısını görəcəksiniz.
+
+Sağlamlıq Bəyannaməsi nədir? (Declaration of Health / Декларация о состоянии здоровья). Praktiki hissəsi olan təlimlərdə (məsələn, kran, yükləyici, hündürlükdə iş) hər iştirakçı praktikaya başlamazdan əvvəl Sağlamlıq Bəyannaməsini (forma KLN-A-006) doldurmalı və imzalamalıdır. Bəyannamə portalda doldurulur; suallara "Bəli" cavabı verilərsə, ətraflı izah yazılmalıdır və bu barədə təlimçi məlumatlandırılır. Kağız forma doldurulubsa, təlimçi onu sistemdə qeyd edir. Bəyannamə olmadan praktiki qiymətləndirmə vərəqi doldurula bilməz.
+
+Təlim haqqında rəy (Training feedback / Отзыв об обучении). Təlimin sonunda portalda "Rəy bildir" düyməsi ilə təlimi qiymətləndirirsiniz. Mərkəzin ayarlarından asılı olaraq, testə başlamazdan əvvəl rəy bildirmək tələb oluna bilər.
+
+İmtahan (test) necə keçir? (How the exam works / Как проходит экзамен). İmtahan yalnız təlimçi və ya administrator "İmtahanı başlat" düyməsini basdıqdan sonra açılır; ondan əvvəl suallar görünmür və portalda "İmtahan təlimçi başladanda açılacaq" yazılır. Hər iştirakçı sual bankından təsadüfi seçilmiş suallar alır, cavab variantları da qarışdırılır. Hər cavab dərhal yadda saxlanılır — səhifə yenilənsə, bağlantı kəsilsə və ya başqa cihazdan daxil olsanız, qaldığınız yerdən davam edirsiniz. Test yalnız bir dəfə təqdim edilir. Vaxt limiti varsa, ekranda geri sayım göstərilir və vaxt bitdikdə cavablar avtomatik təqdim olunur. Təlimçi imtahanı bitirdikdə hələ təqdim edilməmiş testlər verilmiş cavablarla avtomatik təqdim edilir. Bəzi testlərdə sərbəst cavablı (açıq) suallar olur; onları təlimçi və ya administrator yoxlayıb qiymət verir.
+
+Nəticəni harada görürəm? (Exam result / Где посмотреть результат). Test qiymətləndirildikdən sonra portalda faiz və "Keçdiniz" / "Keçmədiniz" nəticəsi görünür. İmtahan bağlandıqdan sonra "Cavablara bax" düyməsi ilə hər sualda öz cavabınızı və düzgün cavabı görə bilərsiniz. Süni intellekt modulu aktivdirsə, hər sualın altında "İzah et" düyməsi ilə izah oxuya bilərsiniz — izahlar yalnız məlumat üçündür və nəticəni dəyişmir. Keçid balı hər test üçün təlim mərkəzi tərəfindən təyin olunur.
+
+Təkrar imtahan (Retake / Пересдача). Yeni cəhd yalnız təlim mərkəzinin administratoru tərəfindən verilə bilər. Təkrar imtahan barədə təlim mərkəzi ilə əlaqə saxlayın.
+
+Sertifikatı nə vaxt alıram? (When do I get my certificate / Когда я получу сертификат). Bütün şərtlər yerinə yetirildikdən sonra (iştirak, praktiki qiymətləndirmə — əgər varsa, imtahan) nəticəni təlim mərkəzi təsdiqləyir və sertifikat verilir. Sertifikatı administrator və ya superadministrator elektron imza və ya imza şəkli ilə imzalayır. Uğursuz praktiki qiymətləndirmə və ya iştirak etməmək avtomatik olaraq "Keçmədi" nəticəsi deməkdir və sertifikat verilmir.
+
+Sertifikatımı harada görürəm? (Where is my certificate / Где мой сертификат). Fərdi (özəl) iştirakçılar sertifikatlarını portalda "Sertifikatlarım" bölməsində görür. Şirkət tərəfindən göndərilmiş iştirakçılar portalda yalnız sertifikata malik olduqlarını və etibarlılıq müddətini görür; sertifikatın özünə baxmaq, çap etmək və yükləmək hüququ şirkətinizə məxsusdur. Sertifikatın surəti lazımdırsa, şirkətinizin məsul şəxsinə müraciət edin.
+
+Sertifikat nə qədər etibarlıdır? (Certificate validity / Срок действия сертификата). Etibarlılıq müddəti kursdan asılıdır və sertifikatda göstərilir. Məsələn: operator və kran kursları (forklift, reach truck, elektrikli yükləyici, MEWP, HİAB, mobil kran, körpülü kran, torpaq sıxıcı) — 3 il; iş yeri təhlükəsizliyi, risk idarəetməsi və işə icazə kurslarının əksəriyyəti — 2 il; Hündürlükdə Görülən İşlər — 1 il; IOSH Təhlükəsiz İdarəetmə — müddətsiz. Müddət bitməzdən əvvəl yeniləmə (refresher) kursu keçmək lazımdır; təlim mərkəzi müddətin bitməsinə yaxın xatırlatma göndərə bilər.
+
+Sertifikatın həqiqiliyini necə yoxlamaq olar? (Certificate verification / Проверка подлинности сертификата). Hər sertifikatda QR kod var. QR kodu telefonla skan etdikdə KVET-in yoxlama səhifəsi açılır və iştirakçı nömrəsi, ad, təlimin tarixi, etibarlılıq tarixi və status (etibarlı, müddəti bitib və s.) göstərilir. Yoxlama səhifəsində sertifikatın özü göstərilmir və yüklənmir. Elektron imzaların həqiqiliyi də bu səhifədə yoxlanılır.
+
+Şirkətlər üçün (For companies / Для компаний). Şirkətlər KVET Şirkət portalında öz işçilərinin sertifikatlarını, etibarlılıq müddətlərini, iştirak, praktiki və imtahan nəticələrini və təlimçi rəyini görür; sertifikatları çap edə və yükləyə, Excel-ə ixrac edə və yeni təlim və ya yeniləmə sorğusu göndərə bilər.
+
+Şəxsi məlumatlar (Personal data / Персональные данные). Şəxsiyyət vəsiqəsi və FİN məlumatları yalnız təlim mərkəzinin administratorlarına görünür; QR yoxlama səhifəsində, şirkət, təlimçi və iştirakçı portallarında göstərilmir.

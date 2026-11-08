@@ -1,0 +1,6 @@
+# The admin panel is only reachable at /admin.kvet (it is not linked from the home page).
+/admin.kvet   /staff-panel-7q3k.html   200
+/admin.kvet/  /staff-panel-7q3k.html   200
+# External auditors (read-only role) sign in at /audit.kvet; it is the same panel, showing only what the role may see.
+/audit.kvet   /staff-panel-7q3k.html   200
+/audit.kvet/  /staff-panel-7q3k.html   200

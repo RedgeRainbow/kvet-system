@@ -1,0 +1,12 @@
+name = "kvet-certificates"
+pages_build_output_dir = "public"
+compatibility_date = "2026-10-01"
+
+[vars]
+SUPABASE_URL = "https://vryxvfwhirboeyannimo.supabase.co"
+SUPABASE_PUBLISHABLE_KEY = "sb_publishable_q_6z9Lw0SHep3I0OIMg1OQ_Mzh9xynp"
+BOOTSTRAP_ADMIN_EMAIL = "office@kvet.edu.az"   # the first admin: create this user in Supabase Auth, it becomes admin on first sign-in
+
+[[r2_buckets]]
+binding = "BUCKET"
+bucket_name = "kvet-certificate"

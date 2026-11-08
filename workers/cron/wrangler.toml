@@ -1,0 +1,10 @@
+name = "kvet-cron"
+main = "index.js"
+compatibility_date = "2026-10-01"
+
+[vars]
+APP_URL = "https://kvet-certificates.pages.dev"   # your live address (custom domain if you have one)
+
+[triggers]
+crons = ["17 0 * * *"]   # every day 00:17 UTC = 04:17 Baku
+# secret: npx wrangler secret put CRON_SECRET   (the same value as the Pages secret CRON_SECRET)
