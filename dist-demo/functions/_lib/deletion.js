@@ -8,6 +8,7 @@
    - trainer / company / practical sheet / presentation -> removed; records that pointed at them are kept and just lose the link
    - enrolment (Issue queue row) -> the trainee leaves that session; enrolment data goes, its certificate is archived */
 import { S, enrId, getMany, sessionsOf } from './core.js';
+import { forgetAccounts } from './routes_notify.js';
 import { loginKey } from './auth.js';
 
 export const KINDS = ['blank', 'sheet', 'material', 'company', 'trainer', 'trainee', 'session', 'cert', 'enrol'];
@@ -142,6 +143,9 @@ export async function applyPlan(c, P) {
   // always by id (batched): a whole-collection wipe could also remove records created after the plan was made
   for (const [col, m] of Object.entries(P.del)) if (m.size) await c.D.delMany(col, [...m.keys()]);
   for (const k of P.files) await c.B.delete(k).catch(() => {});
+  // 4. deleted trainers, companies and candidates: their conversation with the centre, events and panel settings
+  const keys = [['trainees', 'trainee'], ['trainers', 'trainer'], ['companies', 'company']].flatMap(([col, k]) => [...(P.del[col]?.keys() || [])].map(id => k + ':' + id));
+  if (keys.length) await forgetAccounts(c, keys);
 }
 
 /* Old certificate back from the archive (fails with dupCert when its number has been used since). */

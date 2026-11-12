@@ -1,7 +1,8 @@
 /* Staff routes: companies, trainers, trainees (+ batch import) and portal credentials. */
 import { H, S, str, need, bool, uid, audit, diff, traineeOut, trainerOut, stripSecret } from './core.js';
 import { claimLogin, genPassword, candidatePassword, pbk, rnd, loginKey } from './auth.js';
-import { tempId } from './identity.js';
+import { tempId, nextAtts, attFree } from './identity.js';
+import { unsign, slot } from './signs.js';
 
 export const DOC_TYPES = ['id', 'passport', 'residence', 'other'];
 
@@ -83,7 +84,7 @@ export async function createTrainee(c, b, { strict = c.user?.kind !== 'staff' } 
     await c.D.put('trainees', [{ id, data: t }]);
     return { t, password: cred.password, sameName };
   }
-  const year = new Date(c.now()).getUTCFullYear(), att = S.learnerNo(year, await c.D.seq('attendance'));
+  const [att] = await nextAtts(c);
   if (p.fin) await claimFin(c.D, p.fin, att, canSeeFin(c));
   const cred = await newCreds(c, 'trainee', att, att);
   const t = { id: att, att, ...p, co, on: true, consent: consentOf(c, b), createdAt: new Date(c.now()).toISOString(), createdBy: { kind: c.user?.kind || 'staff', name: c.user?.name || c.user?.email || '' }, login: cred.login, salt: cred.salt, hash: cred.hash, pv: 0 };
@@ -122,6 +123,34 @@ export const peopleRoutes = {
   } },
 
   /* ------------------------------------------------------------- trainees */
+  /* Change a candidate's learner (attendance) number, e.g. to the one they had in an earlier year.
+     The record keeps its key, so sessions, results, signatures and certificates stay attached. The sign-in name follows the
+     number when it was the number. Certificates keep the number printed on them unless "certs" is asked for: then their
+     copies change too, and a signed one has to be signed again (its content changed). */
+  'POST /trainee/att': { auth: 'staff', act: 'trainee.att', async fn(c) {
+    const b = await c.body(), x = await c.D.get('trainees', str(b.id, 60)); need(x, 'noRec', 404); need(!x.temp, 'tempAccount', 409);
+    const att = str(b.att, 40).trim().toUpperCase(); need(/^[A-Z0-9][A-Z0-9._/-]{2,39}$/.test(att), 'badAttNo');
+    const old = x.att || '';
+    if (att === old) return { trainee: traineeOut(x, true), certs: 0, unsigned: 0 };
+    need(await attFree(c.D, att, x.id), 'attTaken', 409);
+    // the sign-in name follows the number (only when it was the number; a name chosen by hand stays)
+    let login = x.login;
+    if (String(x.login || '').toLowerCase() === old.toLowerCase()) {
+      try { await c.D.insert('logins', loginKey('trainee', att), { login: att, id: x.id }); login = att; await c.D.del('logins', loginKey('trainee', old)); }
+      catch (/** @type {any} */ e) { if (!(e instanceof H) || e.message !== 'dup') throw e; }    // that sign-in name is taken: keep the old one
+    }
+    x.att = att; x.login = login; x.attWas = [...new Set([...(x.attWas || []), old].filter(Boolean))].slice(-5);
+    await c.D.put('trainees', [{ id: x.id, data: x }]);
+    let certs = 0, unsigned = 0;
+    if (b.certs) {
+      const list = (await c.D.byField('certs', 'tid', x.id)).map(r => r.data).filter(k => (k.snap?.att || k.att) !== att);
+      for (const k of list) { if (k.sign || k.esign) { unsigned++; delete k.sign; delete k.esign; } k.att = att; if (k.snap) k.snap.att = att; }
+      if (list.length) { await c.D.put('certs', list.map(k => ({ id: k.no, data: k }))); await unsign(c, list.map(k => slot.cert(k.no))); }
+      certs = list.length;
+    }
+    await audit(c, 'trainee.renumber', `${old || '—'} → ${att} ${S.fullAz(x)}${certs ? ` · ${certs} certificate(s)` : ''}`, { entity: { kind: 'trainee', id: x.id, label: `${att} ${S.fullAz(x)}` }, changes: [{ f: 'att', from: old, to: att }] });
+    return { trainee: traineeOut(x, true), certs, unsigned, login };
+  } },
   'POST /trainee/save': { auth: 'staff', act: 'trainee.save', async fn(c) {
     const b = await c.body();
     if (!b.id) { const { t, password } = await createTrainee(c, b); await audit(c, 'trainee.create', `${t.att} ${S.fullAz(t)}`, { entity: { kind: 'trainee', id: t.id, label: `${t.att} ${S.fullAz(t)}` } }); return { trainee: traineeOut(t, true), creds: { login: t.login, password } }; }
@@ -189,8 +218,8 @@ export const peopleRoutes = {
     }
     ok.splice(0, ok.length, ...ok.filter(k => k.p.fin && k.p.phone));
     if (ok.length) {
-      const year = new Date(c.now()).getUTCFullYear(), first = await c.D.seqN('attendance', ok.length), now = new Date(c.now()).toISOString();
-      ok.forEach((x, i) => (x.att = S.learnerNo(year, first + i)));
+      const atts = await nextAtts(c, ok.length), now = new Date(c.now()).toISOString();
+      ok.forEach((x, i) => (x.att = atts[i]));
       const claimed = new Set(await c.D.insertMany('fins', ok.filter(x => x.p.fin).map(x => ({ id: x.p.fin, data: { id: x.att } }))));
       const fresh = ok.filter(x => !x.p.fin || claimed.has(x.p.fin));
       for (const x of ok) if (x.p.fin && !claimed.has(x.p.fin)) {

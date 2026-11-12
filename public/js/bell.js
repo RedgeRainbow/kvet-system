@@ -46,11 +46,21 @@ function draw() {
    <div class="nb" id="nBody">${tab === 'm' && portalMsgs ? `<div class="mute sm" style="padding:12px">…</div>` : notesHtml()}</div>`;
   if (tab === 'm' && portalMsgs) chat();
 }
+/* to-dos: open the work, or put it off until tomorrow (it disappears by itself once done).
+   events: open, dismiss (✓), or never show this kind again (🔕); "Clear all" empties the list. */
+const act = (lbl, attrs, ic) => `<button class="na" type="button" ${attrs} title="${esc(lbl)}" aria-label="${esc(lbl)}">${ic}</button>`;
 function notesHtml() {
-  const d = data, todo = d.todo.map(x => `<button class="ni todo" data-link="${esc(x.link || '')}"><span class="ic">${esc(x.icon || '•')}</span><span>${esc(text(x))}</span></button>`).join('');
-  const msgs = K === 'staff' && d.msgs ? `<button class="ni todo" data-link="#/messages"><span class="ic">💬</span><span>${esc(t('nMsgsUnread', d.msgs))}</span></button>` : '';
-  const notes = d.notes.map(x => `<button class="ni ${x.unread ? 'new' : ''}" data-link="${esc(x.link || '')}"><span class="ic">${x.unread ? '●' : '○'}</span><span>${esc(text(x))}<br><span class="mute xs">${esc(fmtDateTime(x.at))}</span></span></button>`).join('');
-  return `${todo || msgs ? `<div class="ns">${esc(t('toDo'))}</div>${msgs}${todo}` : ''}<div class="ns">${esc(t('recent'))}</div>${notes || `<p class="mute sm" style="padding:6px 14px">${esc(t('noNotifications'))}</p>`}`;
+  const d = data, mutable = new Set(d.mutable || []);
+  const todo = d.todo.map(x => `<div class="nrow todo"><button class="ni" data-link="${esc(x.link || '')}"><span class="ic">${esc(x.icon || '•')}</span><span>${esc(text(x))}</span></button>${x.key ? act(t('nLater'), `data-later="${esc(x.key)}" data-n="${x.n || 0}"`, '⏰') : ''}</div>`).join('');
+  const msgs = K === 'staff' && d.msgs ? `<div class="nrow todo"><button class="ni" data-link="#/messages"><span class="ic">💬</span><span>${esc(t('nMsgsUnread', d.msgs))}</span></button></div>` : '';
+  const notes = d.notes.map(x => `<div class="nrow"><button class="ni ${x.unread ? 'new' : ''}" data-link="${esc(x.link || '')}"><span class="ic">${x.unread ? '●' : '○'}</span><span>${esc(text(x))}<br><span class="mute xs">${esc(fmtDateTime(x.at))}</span></span></button>${act(t('nHide'), `data-hide="${esc(x.id)}"`, '✓')}${mutable.has(x.k) ? act(t('nMute'), `data-mute="${esc(x.k)}"`, '🔕') : ''}</div>`).join('');
+  const foot = [d.later ? esc(t('nLaterN', d.later)) : '', d.muted?.length ? esc(t('nMutedN', d.muted.length)) : ''].filter(Boolean);
+  return `${todo || msgs ? `<div class="ns">${esc(t('toDo'))}</div>${msgs}${todo}` : ''}<div class="ns nsh"><span>${esc(t('recent'))}</span>${notes ? `<button class="lnk" type="button" data-clear>${esc(t('nClearAll'))}</button>` : ''}</div>${notes || `<p class="mute sm" style="padding:6px 14px">${esc(t('noNotifications'))}</p>`}
+   ${foot.length ? `<p class="mute xs nfoot">${foot.join(' · ')} · <button class="lnk" type="button" data-showall>${esc(t('nShowAll'))}</button></p>` : ''}`;
+}
+/* one panel action, then the list again */
+async function panelAct(body, undo) {
+  try { await api(base(K) + '/notify/act', { kind: K, body, quiet: true }); await poll(); draw(); if (undo) toast(undo, 'ok'); } catch (/** @type {any} */ e) { fail(e); }
 }
 /* edit one message: resolves the new text, or null */
 export const editText = text => new Promise(res => { const m = openModal({ title: t('msgEdit'), html: `<textarea id="metx" rows="4" maxlength="2000" style="width:100%">${esc(text)}</textarea>`,
@@ -74,11 +84,15 @@ async function chat() {
     if (atEnd) log.scrollTop = log.scrollHeight;
     if (data.msgs) { data.msgs = 0; badge(); }
   };
-  body.innerHTML = `<p class="hint" style="margin:8px 12px">${esc(t('msgPortalHint'))}</p><div class="chatlog nlog" id="nLog"></div>
+  body.innerHTML = `<div class="row" style="margin:8px 12px;align-items:flex-start"><p class="hint grow" style="margin:0">${esc(t('msgPortalHint'))}</p><button class="lnk" type="button" id="nClr" style="flex:none;margin-left:8px">${esc(t('msgClearMine'))}</button></div><div class="chatlog nlog" id="nLog"></div>
     <form class="nsend" id="nSend"><textarea id="nTxt" rows="2" maxlength="2000" placeholder="${esc(t('msgPlaceholder'))}"></textarea><button class="btn" type="submit">${esc(t('sendMsg'))}</button></form>`;
   $('#nSend').onsubmit = async e => {
     e.preventDefault(); const x = $('#nTxt'), v = x.value.trim(); if (!v) return;
     try { await api(base(K) + '/message', { kind: K, body: { text: v } }); x.value = ''; await load(); } catch (/** @type {any} */ er) { if (er.message === 'tooMany') toast(t('msgTooMany'), 'bad'); else fail(er); }
+  };
+  $('#nClr').onclick = async e => {
+    e.stopPropagation(); if (!await confirmDlg(t('msgClearMineConfirm'), { danger: true })) return;
+    try { await api(base(K) + '/messages/clear', { kind: K, body: {} }); await load(); toast(t('msgCleared'), 'ok'); } catch (/** @type {any} */ er) { fail(er); }
   };
   $('#nTxt').onkeydown = e => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) $('#nSend').requestSubmit(); };
   try { await load(); const log = $('#nLog'); if (log) log.scrollTop = log.scrollHeight; } catch (/** @type {any} */ er) { fail(er); }
@@ -90,6 +104,15 @@ document.addEventListener('click', e => {
   if (!open) return;
   if (e.target?.closest('#nClose')) return close();
   const nt = e.target?.closest('[data-nt]'); if (nt) { tab = nt.dataset.nt; return draw(); }
+  const pa = e.target?.closest('#npanel [data-hide],#npanel [data-later],#npanel [data-mute],#npanel [data-clear],#npanel [data-showall]');
+  if (pa) {
+    e.stopPropagation(); const ds = pa.dataset;
+    if (ds.hide) return panelAct({ op: 'hide', id: ds.hide });
+    if (ds.later) return panelAct({ op: 'later', key: ds.later, n: Number(ds.n) || 0 }, t('nLaterDone'));
+    if (ds.mute) return panelAct({ op: 'mute', k: ds.mute }, t('nMuteDone'));
+    if ('clear' in ds) return panelAct({ op: 'clear' });
+    if ('showall' in ds) return panelAct({ op: 'show' });
+  }
   const ni = e.target?.closest('#npanel [data-link]');
   if (ni) {
     const l = ni.dataset.link;

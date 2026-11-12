@@ -23,7 +23,7 @@ export const ROLE_ONLY = {
 export const ROLE_PLUS = { emergency: new Set(['users', 'perf', 'analytics']) };
 export const ASSIGNABLE = r => r !== 'emergency';
 /* What each role sees in the admin panel menu (roles not listed: everything their actions allow). */
-export const ROLE_NAV = { approver: ['approvals', 'sessions', 'certificates'], auditor: ['analytics', 'sessions', 'certificates'] };
+export const ROLE_NAV = { approver: ['approvals', 'sessions', 'certificates', 'messages'], auditor: ['analytics', 'sessions', 'certificates', 'messages'] };
 
 /* Minimum role rank for every protected action. The server enforces it, the UI only hides buttons with it. */
 export const MIN = {
@@ -48,7 +48,7 @@ export const MIN = {
   // online tests: reviewing answers and deciding pass / fail (the session's own trainer may do it too, in the trainer portal)
   'test.review': 3,
   // people and portals (they carry the confidential ID/FIN, so admin and up)
-  'company.save': 3, 'trainer.save': 3, 'trainee.save': 3, 'trainee.import': 3, 'credentials.reset': 3,
+  'company.save': 3, 'trainer.save': 3, 'trainee.save': 3, 'trainee.att': 3, 'trainee.import': 3, 'credentials.reset': 3,
   // certificates
   'issue': 3, 'cert.update': 3, 'cert.revoke': 3,
   // signing certificates and session documents: superadmin (and the approver role, see ROLE_ONLY)

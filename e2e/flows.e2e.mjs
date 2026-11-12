@@ -129,6 +129,44 @@ test('online exam: the network drops before the hand-in; the answers wait on the
   await close();
 });
 
+test('bell: remind tomorrow, dismiss one event, clear all', async () => {
+  const ck = (await api('/login', { role: 'company', login: D.company.creds.login, password: D.company.creds.password }, '')).token;
+  for (const note of ['one', 'two']) await api('/portal/company/request', { kind: 'training', bid: D.blank.id, note }, ck);
+  const { p, errors, close } = await page();
+  await signIn(p, '/admin.kvet', STAFF.email, STAFF.password);
+  await p.waitForSelector('#bellBtn'); await p.click('#bellBtn'); await p.waitForSelector('#npanel [data-later]');
+  await p.click('#npanel .nrow.todo [data-later]');
+  await p.waitForSelector('#npanel .nfoot');                         // "1 to-do put off until tomorrow · Show everything again"
+  const before = await p.$$eval('#npanel [data-hide]', b => b.length); assert.ok(before >= 2);
+  await p.click('#npanel [data-hide]');
+  await p.waitForFunction(n => document.querySelectorAll('#npanel [data-hide]').length === n - 1, before);
+  await p.click('#npanel [data-clear]');
+  await p.waitForFunction(() => !document.querySelector('#npanel [data-hide]'));
+  await p.click('#npanel [data-showall]');
+  await p.waitForSelector('#npanel [data-hide]');
+  assert.deepEqual(errors, [], errors.join('\n'));
+  await close();
+});
+
+test('team messages: an approver writes to the superadmin, who reads and answers', async () => {
+  await api('/users', { email: 'apv.e2e@kvet.az', password: 'Passw0rd!x', role: 'approver', name: 'Nərmin' });
+  await api('/staff/profile', { name: 'Boss', title: 'Director' });
+  const a = await page();
+  await signIn(a.p, '/admin.kvet', 'apv.e2e@kvet.az', 'Passw0rd!x');
+  await a.p.waitForSelector('#nav a[href="#/messages"]'); await a.p.click('#nav a[href="#/messages"]');
+  await a.p.click('#newM'); await a.p.waitForSelector('#rl [data-pick]'); await a.p.click('#rl [data-pick]');
+  await a.p.fill('#mtxt', 'Salam! Sertifikatı yoxlayın, zəhmət olmasa.'); await a.p.click('#msend button');
+  await a.p.waitForSelector('#mlog .msg.user');
+  const b = await page();
+  await signIn(b.p, '/admin.kvet', STAFF.email, STAFF.password);
+  await b.p.waitForSelector('#nav a[href="#/messages"] .n, #nav a[href="#/messages"] [class*=cnt]', { timeout: 8000 }).catch(() => {});
+  await b.p.click('#nav a[href="#/messages"]'); await b.p.waitForSelector('#thl [data-th^="dm:"]'); await b.p.click('#thl [data-th^="dm:"]');
+  await b.p.waitForSelector('#mlog .msg.assistant');
+  await b.p.fill('#mtxt', 'Baxıram.'); await b.p.click('#msend button'); await b.p.waitForSelector('#mlog .msg.user');
+  assert.deepEqual([...a.errors, ...b.errors], [], [...a.errors, ...b.errors].join('\n'));
+  await a.close(); await b.close();
+});
+
 test('wrong password: a clear message, no sign-in', async () => {
   const { p, errors, close } = await page();
   await signIn(p, '/admin.kvet', STAFF.email, 'wrong-password');

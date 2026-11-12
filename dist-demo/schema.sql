@@ -396,6 +396,7 @@ create index if not exists rec_requests_at     on rec_requests ((data->>'at'));
 create index if not exists rec_signs_code      on rec_signs ((data->>'code'));
 -- notifications, messages, company groups, error log
 create index if not exists rec_notes_to      on rec_notes ((data->>'to'), (data->>'at'));
+create index if not exists rec_notes_ref     on rec_notes ((data->>'ref')) where (data->>'ref') is not null;
 create index if not exists rec_msgs_th       on rec_msgs ((data->>'th'), (data->>'at'));
 create index if not exists rec_threads_last  on rec_threads ((data->>'lastAt'));
 create index if not exists rec_cogroups_co   on rec_cogroups ((data->>'co'));

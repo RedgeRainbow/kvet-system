@@ -18,6 +18,7 @@ import { analyticsRoutes } from './routes_analytics.js';
 import { candidateRoutes } from './routes_candidates.js';
 import { libraryRoutes } from './routes_library.js';
 import { notifyRoutes } from './routes_notify.js';
+import { dmRoutes } from './routes_dm.js';
 
 /* live updates: the pages poll their revision counter (see live.js) */
 const liveRoutes = {
@@ -28,7 +29,7 @@ const liveRoutes = {
 };
 /* trainee routes that work before the profile (ID/FIN, phone) is complete */
 const TRAINEE_OPEN = new Set(['/portal/trainee/home', '/portal/trainee/profile/complete', '/portal/trainee/password', '/portal/trainee/rev']);
-export const TABLE = { ...publicRoutes, ...portalRoutes, ...peopleRoutes, ...trainingRoutes, ...findRoutes, ...systemRoutes, ...testRoutes, ...liveRoutes, ...groupRoutes, ...approvalRoutes, ...aiRoutes, ...analyticsRoutes, ...candidateRoutes, ...libraryRoutes, ...notifyRoutes };
+export const TABLE = { ...publicRoutes, ...portalRoutes, ...peopleRoutes, ...trainingRoutes, ...findRoutes, ...systemRoutes, ...testRoutes, ...liveRoutes, ...groupRoutes, ...approvalRoutes, ...aiRoutes, ...analyticsRoutes, ...candidateRoutes, ...libraryRoutes, ...notifyRoutes, ...dmRoutes };
 const ROUTES = Object.entries(TABLE).map(([k, v]) => {
   const [m, p] = k.split(' '), keys = [];
   const re = new RegExp('^' + p.replace(/:(\w+)/g, (_, n) => { keys.push(n); return '([^/]+)'; }) + '$');

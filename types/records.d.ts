@@ -2,6 +2,7 @@
    Required fields mirror functions/_lib/shapes.js (enforced by the database); the optional ones are every other field the
    code writes. A field missing here is a type error where it is read, so typos in field names are caught. */
 export interface Trainee {
+  attWas?: string[];
   att: string;
   certLang?: string;
   co?: string;
@@ -280,6 +281,7 @@ export interface AuditEntry {
   ip?: string;
 }
 export interface Note {
+  ref?: string;
   a?: any[];
   at: string;
   k: string;

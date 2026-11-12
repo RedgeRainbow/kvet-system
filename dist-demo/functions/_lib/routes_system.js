@@ -6,7 +6,8 @@ import { runReminders, runRetention } from './jobs.js';
 import { KINDS, loadWorld, loadWorldFor, newPlan, runKind, impact, total, applyPlan, restoreFromArchive } from './deletion.js';
 import { SEED_BLANKS, SEED_SHEETS } from './seed.js';
 import { suggestNo } from './routes_training.js';
-import { notify } from './routes_notify.js';
+import { notify, doneNotes } from './routes_notify.js';
+import { forgetStaff } from './routes_dm.js';
 
 export const DCOLS = ['blanks', 'sheets', 'tests', 'groups', 'kb', 'materials', 'companies', 'trainers', 'trainees', 'sessions', 'enr', 'rel', 'signs', 'certs', 'archive', 'retired', 'fins', 'logins', 'requests', 'candreq', 'libdocs', 'cogroups', 'notes', 'nseen', 'threads', 'msgs', 'links', 'settings', 'sigs', 'cams', 'snaps', 'audit'];
 /* A restore replaces everything EXCEPT the audit trail (and staff accounts, which live in Supabase Auth): the trail of who did what is never rewritten. */
@@ -254,7 +255,9 @@ export const systemRoutes = {
   'POST /users/delete': { auth: 'staff', act: 'users', async fn(c) {
     const b = await c.body(); need(b.id !== c.user.id, 'badInput');
     const x = await c.D.get('staff', String(b.id));
-    await c.A.deleteUser(String(b.id)); await c.D.del('staff', String(b.id)); await audit(c, 'user.delete', `${x?.email || b.id} ${x?.role || ''}`); return { ok: 1 };
+    await c.A.deleteUser(String(b.id)); await c.D.del('staff', String(b.id));
+    const n = await forgetStaff(c, String(b.id));                   // their team conversations go with them
+    await audit(c, 'user.delete', `${x?.email || b.id} ${x?.role || ''}${n ? ` · ${n} conversation(s)` : ''}`); return { ok: 1 };
   } },
 
   /* -------------------------------------------------------------- backups */
@@ -339,6 +342,7 @@ export const systemRoutes = {
     if ('reply' in b) x.reply = str(b.reply, 1000);
     x.updatedAt = new Date(c.now()).toISOString(); x.updatedBy = c.user.email;
     await c.D.put('requests', [{ id: x.id, data: x }]); await audit(c, 'request.update', `${x.coName} · ${x.status}`);
+    if (x.status !== 'new') await doneNotes(c, 'request:' + x.id);      // handled: the "new request" event goes away
     await notify(c, 'company:' + x.co, 'nRqUpdated', ['rq_' + x.status, x.reply || ''], 'requests');
     return { request: x };
   } },

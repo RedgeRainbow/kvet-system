@@ -12,7 +12,7 @@ export const SK_VERSION = 2;
 const line = (...v) => S.foldText(v.flat(Infinity).filter(x => x !== null && x !== undefined && x !== '').join(' ')).replace(/\s+/g, ' ').trim().slice(0, 400);
 const KEYS = {
   // names and numbers only: ID/FIN, phone and e-mail are found by exact match, and only by staff allowed to see them
-  trainees: t => line(S.fullAz(t), S.fullEn(t), t.att, t.id, t.login),
+  trainees: t => line(S.fullAz(t), S.fullEn(t), t.att, t.id, t.login, ...(t.attWas || [])),
   certs: x => line(x.no, x.att, x.snap?.names?.az, x.snap?.names?.en, x.snap?.blank?.name, x.snap?.company),
   archive: x => line(x.no, x.cert?.no, x.att, x.name, x.cert?.att, x.cert?.snap?.names?.az, x.cert?.snap?.names?.en, x.trainee?.name, x.trainee?.att),
 };

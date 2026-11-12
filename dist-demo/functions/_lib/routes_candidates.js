@@ -3,7 +3,7 @@
    col "candreq": { id, co, coName, person, consent, status: pending | approved | returned, at, by, review, traineeId } */
 import { H, S, str, need, bool, uid, audit, getSettings } from './core.js';
 import { readPerson, createTrainee, sameNamePeople } from './routes_people.js';
-import { notify } from './routes_notify.js';
+import { notify, doneNotes } from './routes_notify.js';
 
 const mask = fin => (fin ? '•••••' + String(fin).slice(-2) : '');
 const out = (x, fin) => ({ ...x, person: { ...x.person, fin: fin ? x.person.fin : mask(x.person.fin) } });
@@ -21,7 +21,7 @@ export const candidateRoutes = {
     if (p.fin) { await dupFinChecks(c, p.fin); }
     const x = { id: uid('cr'), co: co.id, coName: co.name, person: p, consent: bool(b.consent), status: 'pending', at: new Date(c.now()).toISOString(), by: co.contactPerson || co.name };
     await c.D.put('candreq', [{ id: x.id, data: x }]); await audit(c, 'candidate.request', `${co.name} · ${S.fullAz(p)}`);
-    await notify(c, 'staff:a:cand.approve', 'nCandNew', [co.name, S.fullAz(p)], '#/approvals');
+    await notify(c, 'staff:a:cand.approve', 'nCandNew', [co.name, S.fullAz(p)], '#/approvals', 'candreq:' + x.id);
     return { request: out(x, false) };
   } },
   /* batch registration from the Excel form (same template as the office; FIN + phone required unless the company is set optional) */
@@ -78,6 +78,7 @@ export async function decideCandidate(c, id, ok, review) {
   }
   x.status = ok ? 'approved' : 'returned'; x.review = review;
   await c.D.put('candreq', [{ id: x.id, data: x }]);
+  await doneNotes(c, 'candreq:' + x.id);
   await notify(c, 'company:' + x.co, ok ? 'nCandOk' : 'nCandRet', [S.fullAz(x.person), review.note || ''], 'cands');
   await audit(c, ok ? 'candidate.approve' : 'candidate.return', `${x.coName} · ${S.fullAz(x.person)}${created ? ' → ' + created.t.att : ''}${review.note ? ' · ' + review.note : ''}`);
   return { request: out(x, S.can(c.user.role, 'fin.view')), ...(created ? { trainee: { id: created.t.id, att: created.t.att, name: S.fullAz(created.t) }, creds: { login: created.t.login, password: created.password } } : {}) };

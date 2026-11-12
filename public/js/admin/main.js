@@ -12,7 +12,7 @@ const PAGES = {
 const SKEL = `<div class="skel-page" aria-hidden="true"><div class="skel w40"></div><div class="card"><div class="skel"></div><div class="skel w80"></div><div class="skel w60"></div></div><div class="card"><div class="skel"></div><div class="skel w70"></div></div></div>`;
 /** @type {any} */ let shown = null;
 const NAV = [
-  ['dashboard', 'home', 'navDashboard', 'dashboard'], ['analytics', 'chart', 'navAnalytics', 'analytics'], ['performance', 'spark', 'navPerformance', 'perf'], ['grp', 'grpTraining'], ['sessions', 'calendar', 'navSessions'], ['issue', 'check', 'navIssue', 'issue'], ['certificates', 'award', 'navCerts'], ['requests', 'inbox', 'navRequests', 'requests'], ['messages', 'chat', 'navMessages', 'messages'], ['approvals', 'shield', 'navApprovals', 'approve'],
+  ['dashboard', 'home', 'navDashboard', 'dashboard'], ['analytics', 'chart', 'navAnalytics', 'analytics'], ['performance', 'spark', 'navPerformance', 'perf'], ['grp', 'grpTraining'], ['sessions', 'calendar', 'navSessions'], ['issue', 'check', 'navIssue', 'issue'], ['certificates', 'award', 'navCerts'], ['requests', 'inbox', 'navRequests', 'requests'], ['messages', 'chat', 'navMessages', 'view'], ['approvals', 'shield', 'navApprovals', 'approve'],
   ['grp', 'grpLibrary'], ['blanks', 'file', 'navBlanks'], ['sheets', 'clipboard', 'navSheets'], ['tests', 'quiz', 'navTests', 'library'], ['materials', 'monitor', 'navMaterials'], ['forms', 'file', 'navForms', 'library'], ['docs', 'folder', 'navDocs', 'libdocs'],
   ['grp', 'grpPeople'], ['trainees', 'people', 'navTrainees'], ['groups', 'group', 'navGroups', 'library'], ['trainers', 'cap', 'navTrainers'], ['companies', 'building', 'navCompanies'],
   ['grp', 'grpSystem'], ['settings', 'settings', 'navSettings', 'settings.save'], ['users', 'shield', 'navUsers', 'users'], ['audit', 'list', 'navAudit', 'audit.view'], ['system', 'database', 'navSystem', 'backup.view'], ['cameras', 'camera', 'navCameras', 'camera'], ['ai', 'spark', 'navAi', 'library'],
@@ -24,7 +24,7 @@ mountPortal({ kind: 'staff', titleKey: 'portalStaff', async boot({ app, signOut,
   globalThis.KVET_NODL = !can('download');                          // auditors read documents on screen only
   if (can('backup.create')) api('/backup/auto', { kind: 'staff', body: {} }).catch(() => {});
   const only = S.ROLE_NAV[A.role];                                     // approver / auditor: a fixed short menu
-  const nav = NAV.filter(n => n[0] === 'grp' || (only ? only.includes(n[0]) : can(n[3] || 'view'))).filter((n, i, all) => n[0] !== 'grp' || (all[i + 1] && all[i + 1][0] !== 'grp'));   // no empty group headings
+  const nav = NAV.filter(n => n[0] === 'grp' || (only ? only.includes(n[0]) : can(n[3] || 'view') && !(n[0] === 'messages' && A.role === 'emergency'))).filter((n, i, all) => n[0] !== 'grp' || (all[i + 1] && all[i + 1][0] !== 'grp'));   // no empty group headings
   app.innerHTML = `${topbar({ title: t('portalStaff'), menu: true, sub: `${esc(A.me.email || '')}<br><b>${esc(t('role_' + A.role))}</b>` })}
    <div class="shell"><nav class="nav" id="nav" aria-label="${esc(t('menu'))}">${nav.map(n => n[0] === 'grp' ? `<button type="button" class="grp" data-grp="${n[1]}" aria-expanded="true"><span>${esc(t(n[1]))}</span><span class="chev" aria-hidden="true">▾</span></button>` : `<a href="#/${n[0]}" data-p="${n[0]}"><span class="ic">${icon(n[1])}</span>${esc(t(n[2]))}<span class="cnt hide" data-cnt="${n[0]}"></span></a>`).join('')}</nav><main id="view" tabindex="-1"></main></div>`;
   // break-glass account: a permanent red banner; for the superadmin: every emergency sign-in since the last acknowledgement
@@ -65,13 +65,14 @@ mountPortal({ kind: 'staff', titleKey: 'portalStaff', async boot({ app, signOut,
     await Promise.all([
       can('issue') && api('/issue/queue', q).then(r => setCnt('issue', r.list.filter(x => x.outcome === 'PASS').length)).catch(() => {}),
       can('approve') && api('/approvals', q).then(r => { A.apprCount = r.tests.length + r.materials.length + r.certs.length + (r.candidates || []).length + (r.links || []).length; setCnt('approvals', A.apprCount + (A.unsignedCerts || 0)); }).catch(() => {}),
-      can('messages') && api('/notify', q).then(r => setCnt('messages', r.msgs || 0)).catch(() => {}),
+      A.role !== 'emergency' && api('/notify', q).then(r => setCnt('messages', r.msgs || 0)).catch(() => {}),
       can('requests') && api('/requests', q).then(r => setCnt('requests', r.list.filter(x => x.status === 'new').length)).catch(() => {}),
       // certificates waiting for a signature: the superadmin and approvers sign them
       can('cert.sign') && api('/certs?unsigned=1&size=0&counts=0', q).then(r => { A.unsignedCerts = r.total || 0; setCnt('certificates', A.unsignedCerts); if (can('approve')) setCnt('approvals', (A.apprCount || 0) + A.unsignedCerts); document.dispatchEvent(new Event('kvet:unsigned')); }).catch(() => {}),
     ]);
   }
   document.addEventListener('kvet:me', () => load().catch(() => {}));
+  document.addEventListener('kvet:badges', () => { badges(true).catch(() => {}); });   // a page changed what the menu counts (e.g. messages read)
   // superadmin / approver: certificates waiting for their signature, a reminder on every page (bottom left)
   const signPill = () => {
     let p = $('#signPill'); const n = A.unsignedCerts || 0, to = can('approve') ? '#/approvals' : '#/certificates/st=UNSIGNED', here = location.hash.startsWith(to);

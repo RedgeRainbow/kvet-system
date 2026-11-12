@@ -1,5 +1,6 @@
 import { findTrainees, deleteRecord, A, can, view, api, S, $, $$, esc, t, toast, fail, busy, openModal, confirmDlg, download, empty, badge, opts, personFields, bindPerson, showCreds, pageHead, bar, searchBox, load, coName, personName, stBadge, writeXlsx, savedToast, selHead, selCell, batchBar, bindBatch, deleteMany, filterToggle , pagerHtml, pageState, resetPage, onPage } from './lib.js';
 import { readXlsx } from '../xlsx.js';
+import { errMsg } from '../ui.js';
 
 // filters stay while moving between pages; the selection is kept until it is used or cleared
 const F = { q: '', co: '', on: '', type: '', from: '', to: '', sort: '', open: false }, SEL = new Set();
@@ -74,12 +75,29 @@ export default async function ({ rerender, args }) {
     }
   }
 
+  /* a new learner number (e.g. the one the person had in an earlier year) */
+  function changeAtt(x, nCerts) {
+    return new Promise(res => {
+      const m = openModal({ title: t('changeAttNo') + ' · ' + personName(x), html: `<p class="hint">${esc(t('changeAttHint'))}</p>
+        <label>${esc(t('learnerNo'))}<input id="nat" class="mono" value="${esc(x.att || '')}" maxlength="40" autocomplete="off"></label>
+        ${nCerts ? `<label class="chk" style="margin-top:8px"><input type="checkbox" id="nac"> ${esc(t('attCertsToo', nCerts))}</label>` : ''}<div class="err" id="nae" role="alert"></div>`,
+        buttons: [{ label: t('cancel'), cls: 'ghost', id: 'x' }, { label: t('save'), id: 'ok', fn: async d => {
+          try {
+            const r = await api('/trainee/att', { kind: 'staff', body: { id: x.id, att: $('#nat', d).value, certs: !!$('#nac', d)?.checked } });
+            toast(t('attChanged', r.trainee.att) + (r.certs ? ' ' + t('attChangedCerts', r.certs, r.unsigned) : '') + (r.login && r.login !== x.login ? ' ' + t('attNewLogin', r.login) : ''), 'ok');
+            res(true); return true;
+          } catch (/** @type {any} */ e) { $('#nae', d).textContent = errMsg(e); return false; }
+        } }] });
+      m.promise.then(v => v !== 'ok' && res(false));
+    });
+  }
   async function detail(x) {
     let sess = [], certs = []; try { ({ sessions: sess, certs } = await api('/trainee/history?id=' + encodeURIComponent(x.id), { kind: 'staff' })); } catch (/** @type {any} */ e) { return fail(e); }
     openModal({ title: personName(x), wide: true, html: `<div class="grid g2"><div><p><b>${esc(t('learnerNo'))}:</b> <span class="mono">${esc(x.att || '—')}</span>${x.provisional ? ' ' + badge('PENDING', t('provisional')) : ''}${x.temp ? `<br><span class="hint">${esc(t('tempAccount'))} · ${esc(t('login'))}: <span class="mono">${esc(x.login || x.id)}</span></span>` : ''}<br><b>${esc(t('company'))}:</b> ${esc(coName(x.co) || t('private'))}<br><b>${esc(t('mobile'))}:</b> ${esc(x.phone || '—')}<br><b>${esc(t('email'))}:</b> ${esc(x.email || '—')}<br><b>${esc(t('login'))}:</b> <span class="mono">${esc(x.login)}</span>${x.fin ? `<br><b>${esc(t('finLabel'))}:</b> <span class="mono">${esc(x.fin)}</span> 🔒` : ''}</p>
       <p class="mute">${esc(S.fullAz(x))}<br>${esc(S.fullEn(x))}</p></div><div><h3>${esc(t('certificates'))}</h3>${certs.map(c => `<p style="margin:6px 0"><span class="mono">${esc(c.no)}</span> ${esc(c.snap.blank.name)} ${stBadge(c.st)}<br><span class="mute xs">${esc(S.fmtDate(c.start))} → ${esc(S.fmtDate(c.expiry))}</span></p>`).join('') || `<p class="mute">${esc(t('none'))}</p>`}</div></div>
       <h3 style="margin-top:12px">${esc(t('navSessions'))}</h3>${sess.map(s => `<p style="margin:4px 0"><a href="#/sessions/${esc(s.id)}">${esc(S.fmtDate(s.date))} · ${esc(A.blanks.find(b => b.id === s.bid)?.name || '')}</a></p>`).join('') || `<p class="mute">${esc(t('none'))}</p>`}`,
-      buttons: [...(can('credentials.reset') ? [{ label: t('resetPassword'), cls: 'ghost', fn: async d => { if (!await confirmDlg(t('resetConfirm'))) return false; const r = await api('/credentials/reset', { kind: 'staff', body: { kind: 'trainee', ids: [x.id] } }); d.close(); showCreds(r.list.map(c => ({ name: c.name, login: c.login, password: c.password }))); return false; } }] : []),
+      buttons: [...(can('trainee.att') && !x.temp ? [{ label: t('changeAttNo'), cls: 'ghost', fn: async d => { if (await changeAtt(x, certs.length)) { d.close(); rerender(); } return false; } }] : []),
+        ...(can('credentials.reset') ? [{ label: t('resetPassword'), cls: 'ghost', fn: async d => { if (!await confirmDlg(t('resetConfirm'))) return false; const r = await api('/credentials/reset', { kind: 'staff', body: { kind: 'trainee', ids: [x.id] } }); d.close(); showCreds(r.list.map(c => ({ name: c.name, login: c.login, password: c.password }))); return false; } }] : []),
         ...(can('delete') ? [{ label: t('delete'), cls: 'bad ghost', fn: async d => { if (await deleteRecord('trainee', x.id, { name: personName(x) })) { d.close(); rerender(); } return false; } }] : []),
         { label: t('close'), id: 'x' }] });
   }

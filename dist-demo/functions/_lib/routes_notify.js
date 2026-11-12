@@ -6,11 +6,17 @@
        staff:*            every staff member         staff:a:<action>  staff who may do <action> (e.g. staff:a:requests)
        staff:u:<userId>   one staff member           trainer:<id> · trainee:<id> · company:<id>
      A note is unread while it is newer than the moment the person last opened the panel ("nseen" collection).
+   Each person decides what their panel shows (their "nseen" record): an event can be dismissed (hid), all events cleared
+   (clr = everything up to that moment), and one KIND of event muted for good (mute). A to-do cannot be dismissed while
+   the work is open: "later" hides it until the next day (snz), and it comes back sooner if more of the same work arrives.
+   A to-do disappears by itself once the work is done; events tied to work (a new request, a candidate to approve,
+   a message) carry a ref and are removed for everybody when that work is handled.
    Messages: one conversation per portal account (trainer / company / candidate) with the training centre. Staff who may handle
    messages (admin, superadmin) answer from Admin -> Messages; every message is kept (collection "msgs", thread summary "threads"). */
 import { S, str, need, uid, audit, sessionsOf, enrOf, enrsOfSession, getSettings } from './core.js';
 import { sessionSigns } from './signs.js';
 import { trainerTodo } from './routes_portal.js';
+import { dmUnread } from './routes_dm.js';
 
 const NOTE_ACTS = ['requests', 'approve', 'cand.approve', 'cert.sign', 'messages', 'issue'];
 const KEEP = 40;                                   // notes shown in the panel
@@ -24,10 +30,31 @@ function addrOf(c) {
   const k = c.user.kind + ':' + c.me.id; return { me: k, to: [k] };
 }
 /* a note for one or more addresses: k = dictionary key, a = its arguments, link = where it leads in that portal (#/…) */
-export async function notify(c, to, k, a = /** @type {any[]} */ ([]), link = '') {
+export async function notify(c, to, k, a = /** @type {any[]} */ ([]), link = '', ref = '') {
   const list = [...new Set([].concat(to).filter(Boolean))]; if (!list.length) return;
-  const at = now(c); try { await c.D.put('notes', list.map(t => ({ id: uid('n'), data: { to: t, k, a: a.map(x => String(x ?? '').slice(0, 160)), link, at } }))); } catch {}
+  const at = now(c); try { await c.D.put('notes', list.map(t => ({ id: uid('n'), data: { to: t, k, a: a.map(x => String(x ?? '').slice(0, 160)), link, at, ...(ref ? { ref } : {}) } }))); } catch {}
 }
+/* the work behind these events is done: remove them from every panel */
+export async function doneNotes(c, ref) {
+  try { const ids = (await c.D.query('notes', { where: [['ref', 'eq', ref]], limit: 500, fields: ['ref'] })).rows.map(r => r.id); if (ids.length) await c.D.delMany('notes', ids); } catch {}
+}
+/* trainer / company / candidate accounts are deleted: their conversation, events and panel settings go with them.
+   keys: "trainee:<id>", "trainer:<id>", "company:<id>" */
+export async function forgetAccounts(c, keys) {
+  keys = [...new Set(keys)]; if (!keys.length) return;
+  for (let i = 0; i < keys.length; i += 200) {
+    const part = keys.slice(i, i + 200);
+    const msgs = (await c.D.query('msgs', { where: [['th', 'in', part]], limit: 20000, fields: ['th'] })).rows.map(r => r.id);
+    const notes = (await c.D.query('notes', { where: [['to', 'in', part]], limit: 20000, fields: ['to'] })).rows.map(r => r.id);
+    if (msgs.length) await c.D.delMany('msgs', msgs);
+    if (notes.length) await c.D.delMany('notes', notes);
+    for (const k of part) await doneNotes(c, 'msg:s:' + k);
+    await c.D.delMany('threads', part); await c.D.delMany('nseen', part);
+  }
+}
+/* kinds of events a person may mute (to-dos and messages to answer cannot be muted) */
+export const MUTABLE = ['nCertReady', 'nCoCertReady', 'nSessionNew', 'nSessionAdded', 'nDocsOpen', 'nTbtOpen', 'nRqUpdated', 'nCandOk', 'nCandRet'];
+const todoKey = x => x.k + '|' + (x.link || '') + '|' + (x.a || []).join('|');
 
 /* live "to do" counts */
 async function todoStaff(c) {
@@ -76,14 +103,35 @@ async function todoCompany(c) {
 const TODO = { staff: todoStaff, trainer: todoTrainer, trainee: todoTrainee, company: todoCompany };
 
 async function feed(c, kind) {
-  const ad = addrOf(c), [notes, seen, todo, th] = await Promise.all([
-    c.D.query('notes', { where: [['to', 'in', ad.to]], order: ['at', 'desc'], limit: KEEP }).then(r => r.rows.map(x => ({ id: x.id, ...x.data }))),
+  const ad = addrOf(c), [all, seen, allTodo, th] = await Promise.all([
+    c.D.query('notes', { where: [['to', 'in', ad.to]], order: ['at', 'desc'], limit: KEEP * 3 }).then(r => r.rows.map(x => ({ id: x.id, ...x.data }))),
     c.D.get('nseen', ad.me), TODO[kind](c).catch(() => []),
-    kind === 'staff' ? (S.can(c.user.role, 'messages') ? c.D.query('threads', { where: [['unreadStaff', 'gt', 0]], limit: 0, count: true }).then(r => r.total || 0) : 0) : c.D.get('threads', ad.me).then(t => t?.unreadAcc || 0)]);
-  const since = seen?.at || '';
-  return { todo, notes: notes.map(({ to, ...n }) => ({ ...n, unread: n.at > since })), unread: notes.filter(n => n.at > since).length, msgs: th, canMsg: kind !== 'staff' || S.can(c.user.role, 'messages') };
+    kind === 'staff' ? Promise.all([S.can(c.user.role, 'messages') ? c.D.query('threads', { where: [['unreadStaff', 'gt', 0]], limit: 0, count: true }).then(r => r.total || 0) : 0, dmUnread(c).catch(() => 0)]).then(([p, d]) => p + d)
+      : c.D.get('threads', ad.me).then(t => t?.unreadAcc || 0)]);
+  const since = seen?.at || '', hid = new Set(seen?.hid || []), clr = seen?.clr || '', mute = new Set(seen?.mute || []), snz = seen?.snz || {}, today = c.today();
+  const notes = all.filter(n => !hid.has(n.id) && n.at > clr && !mute.has(n.k)).slice(0, KEEP);
+  // a to-do put off until tomorrow stays hidden today, unless more of that work has come in since
+  const later = (/** @type {any[]} */ (allTodo)).filter(x => { const z = snz[todoKey(x)]; return z && z.d >= today && (x.n || 0) <= (z.n || 0); });
+  const todo = allTodo.filter(x => !later.includes(x)).map(x => ({ ...x, key: todoKey(x) }));
+  return { todo, later: later.length, muted: [...mute], mutable: MUTABLE, notes: notes.map(({ to, ...n }) => ({ ...n, unread: n.at > since })),
+    unread: notes.filter(n => n.at > since).length, msgs: th, canMsg: kind !== 'staff' || !c.user.emergency };
 }
-async function markSeen(c) { const ad = addrOf(c); await c.D.put('nseen', [{ id: ad.me, data: { at: now(c) } }]); return { ok: 1 }; }
+/* the person's panel settings are kept with their "seen" moment */
+async function panelOf(c) { const ad = addrOf(c); return { ad, p: (await c.D.get('nseen', ad.me)) || { at: '' } }; }
+async function markSeen(c) { const { ad, p } = await panelOf(c); await c.D.put('nseen', [{ id: ad.me, data: { ...p, at: now(c) } }]); return { ok: 1 }; }
+/* { op: 'hide', id } dismiss one event · 'clear' every event so far · 'later', key, n a to-do until tomorrow
+   · 'mute', k / 'unmute', k one kind of event · 'unmuteAll' · 'show' brings back everything hidden or put off */
+async function panelAct(c) {
+  const b = await c.body(), { ad, p } = await panelOf(c), op = str(b.op, 12);
+  if (op === 'hide') p.hid = [...new Set([str(b.id, 40), ...(p.hid || [])])].filter(Boolean).slice(0, 300);
+  else if (op === 'clear') { p.clr = now(c); p.hid = []; }
+  else if (op === 'later') { const key = str(b.key, 300); need(key, 'badInput'); p.snz = { ...Object.fromEntries(Object.entries(p.snz || {}).filter(([, z]) => z.d >= c.today())), [key]: { d: c.today(), n: Number(b.n) || 0 } }; }
+  else if (op === 'mute') { const k = str(b.k, 40); need(MUTABLE.includes(k), 'badInput'); p.mute = [...new Set([...(p.mute || []), k])]; }
+  else if (op === 'unmute') p.mute = (p.mute || []).filter(k => k !== str(b.k, 40));
+  else if (op === 'show') { p.hid = []; p.clr = ''; p.snz = {}; p.mute = []; }
+  else need(false, 'badInput');
+  await c.D.put('nseen', [{ id: ad.me, data: p }]); return { ok: 1 };
+}
 
 /* ---------------------------------------------------------------- messages */
 const TH_KINDS = ['trainer', 'trainee', 'company'];
@@ -122,9 +170,15 @@ async function threadFor(c, kind, id) {
 const portal = kind => ({
   [`GET /portal/${kind}/notify`]: { auth: kind, async fn(c) { return feed(c, kind); } },
   [`POST /portal/${kind}/notify/seen`]: { auth: kind, async fn(c) { return markSeen(c); } },
+  [`POST /portal/${kind}/notify/act`]: { auth: kind, async fn(c) { return panelAct(c); } },
+  /* clear the conversation on my side (the training centre keeps its copy of what was said) */
+  [`POST /portal/${kind}/messages/clear`]: { auth: kind, async fn(c) {
+    const th = await threadFor(c, kind, c.me.id); if (!th.lastAt) return { ok: 1 };
+    th.clrAcc = now(c); th.unreadAcc = 0; await c.D.put('threads', [{ id: th.id, data: th }]); await doneNotes(c, 'msg:p:' + th.id); return { ok: 1 };
+  } },
   [`GET /portal/${kind}/messages`]: { auth: kind, async fn(c) {
-    const th = await threadFor(c, kind, c.me.id), list = await msgsOf(c, th.id);
-    if (th.unreadAcc) { th.unreadAcc = 0; await c.D.put('threads', [{ id: th.id, data: th }]); }
+    const th = await threadFor(c, kind, c.me.id), list = (await msgsOf(c, th.id)).filter(m => m.at > (th.clrAcc || ''));
+    if (th.unreadAcc) { th.unreadAcc = 0; await c.D.put('threads', [{ id: th.id, data: th }]); await doneNotes(c, 'msg:p:' + th.id); }
     return { list: list.map(({ by, uid: _u, ...m }) => ({ ...m, by: m.from === 'staff' ? by : '' })) };
   } },
   // own messages only
@@ -136,7 +190,7 @@ const portal = kind => ({
     const hour = new Date(c.now() - 36e5).toISOString(), recent = (await msgsOf(c, th.id)).filter(m => m.from !== 'staff' && m.at > hour).length;
     need(recent < 30, 'tooMany', 429);
     const m = await post(c, th, 'acc', b.text);
-    await notify(c, 'staff:a:messages', 'nMsgFrom', [th.name], '#/messages/' + encodeURIComponent(th.id));
+    await notify(c, 'staff:a:messages', 'nMsgFrom', [th.name], '#/messages/' + encodeURIComponent(th.id), 'msg:s:' + th.id);
     return { message: m };
   } },
 });
@@ -145,16 +199,22 @@ const portal = kind => ({
 export const notifyRoutes = {
   'GET /notify': { auth: 'staff', act: 'view', async fn(c) { return feed(c, 'staff'); } },
   'POST /notify/seen': { auth: 'staff', act: 'view', async fn(c) { return markSeen(c); } },
+  'POST /notify/act': { auth: 'staff', act: 'view', async fn(c) { return panelAct(c); } },
   ...portal('trainer'), ...portal('trainee'), ...portal('company'),
   /* staff side of the conversations */
   'GET /msg/threads': { auth: 'staff', act: 'messages', async fn(c) {
     const q = S.foldText(str(c.url.searchParams.get('q'), 80)).trim();
-    const rows = (await c.D.query('threads', { order: ['lastAt', 'desc'], limit: 300 })).rows.map(r => r.data);
+    const all = (await c.D.query('threads', { order: ['lastAt', 'desc'], limit: 300 })).rows.map(r => r.data).filter(t => TH_KINDS.includes(t.kind));
+    const exists = new Set();
+    await Promise.all(TH_KINDS.map(async k => { const ids = all.filter(t => t.kind === k).map(t => t.acc); if (ids.length) for (const r of await c.D.getMany(k === 'company' ? 'companies' : k + 's', ids)) exists.add(k + ':' + r.id); }));
+    const gone = all.filter(t => !exists.has(t.id)); if (gone.length) await forgetAccounts(c, gone.map(t => t.id));
+    const rows = all.filter(t => exists.has(t.id));
     return { list: q ? rows.filter(t => S.foldText(`${t.name} ${t.att || ''}`).includes(q)) : rows };
   } },
   'GET /msg/thread': { auth: 'staff', act: 'messages', async fn(c) {
     const p = c.url.searchParams, [kind, id] = str(p.get('id'), 80).split(':'), th = await threadFor(c, kind, id);
     if (th.unreadStaff) { th.unreadStaff = 0; await c.D.put('threads', [{ id: th.id, data: th }]); }
+    await doneNotes(c, 'msg:s:' + th.id);                    // read: the "new message" events go away
     return { thread: th, list: (await msgsOf(c, th.id)).map(m => ({ ...m, mine: m.from === 'staff' && m.uid === c.user.id })) };
   } },
   // staff edit their own answers; they may delete any message, or the whole conversation (kept in the audit trail)
@@ -173,7 +233,8 @@ export const notifyRoutes = {
   'POST /msg/send': { auth: 'staff', act: 'messages', async fn(c) {
     const b = await c.body(), [kind, id] = str(b.th, 80).split(':'), th = await threadFor(c, kind, id);
     const m = await post(c, th, 'staff', b.text); th.unreadStaff = 0; await c.D.put('threads', [{ id: th.id, data: th }]);
-    await notify(c, th.id, 'nMsgFromCentre', [], 'msg');
+    await doneNotes(c, 'msg:s:' + th.id);                    // answered
+    await notify(c, th.id, 'nMsgFromCentre', [], 'msg', 'msg:p:' + th.id);
     await audit(c, 'message.send', th.name); return { message: m, thread: th };
   } },
 };

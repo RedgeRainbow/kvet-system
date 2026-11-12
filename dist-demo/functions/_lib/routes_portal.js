@@ -266,7 +266,7 @@ const companyRoutes = {
       date: S.isDate(b.date) ? b.date : '', note: str(b.note, 1000), contact: str(b.contact, 160), status: 'new', at: new Date(c.now()).toISOString() };
     need(x.bid || x.certs.length || x.note, 'badInput');
     await c.D.put('requests', [{ id: x.id, data: x }]); await audit(c, 'request.create', `${c.me.name} · ${kind}`);
-    await notify(c, 'staff:a:requests', 'nRqNew', [c.me.name], '#/requests');
+    await notify(c, 'staff:a:requests', 'nRqNew', [c.me.name], '#/requests', 'request:' + x.id);
     return { request: x };
   } },
   /* results of one of the company's OWN candidates: attendance, trainer's feedback, practical, exam, outcome per session */

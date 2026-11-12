@@ -33,12 +33,53 @@ export async function moveTrainee(c, from, to) {
   }
   for (const { data: g } of await D.all('groups')) if ((g.traineeIds || []).includes(from)) { g.traineeIds = [...new Set(g.traineeIds.map(x => (x === from ? to : x)))]; await D.put('groups', [{ id: g.id, data: g }]); }
   for (const { data: r } of (await D.query('candreq', { where: [['traineeId', 'eq', from]] })).rows) { r.traineeId = to; await D.put('candreq', [{ id: r.id, data: r }]); }
+  // the conversation with the centre moves along
+  const th = await D.get('threads', 'trainee:' + from);
+  if (th && !(await D.get('threads', 'trainee:' + to))) {
+    const ms = (await D.query('msgs', { where: [['th', 'eq', th.id]], limit: 5000 })).rows;
+    await D.put('threads', [{ id: 'trainee:' + to, data: { ...th, id: 'trainee:' + to, acc: to } }]);
+    if (ms.length) await D.put('msgs', ms.map(r => ({ id: r.id, data: { ...r.data, th: 'trainee:' + to } })));
+    await D.del('threads', th.id);
+  }
   return moved;
+}
+
+/* ---------------------------------------------------------------- learner (attendance) numbers
+   E-<year><5 digits>, one counter per year in the database: it starts again at 00001 every 1 January (Baku time) and only
+   ever goes up, so a number is never handed out twice, even after its person is deleted (gaps are normal).
+   A number the office typed in by hand (a person from an earlier year) is skipped when the counter reaches it.
+   Until round 22 one counter ran across years ("attendance"): the current year continues from it once. */
+export const attYear = c => Number(S.bakuToday(c.now()).slice(0, 4));
+async function attCounter(c) {
+  const D = c.D, year = attYear(c), name = 'attendance|' + year;
+  if (!(await D.peek('attendance|moved'))) {                    // once: carry the old single counter over into this year
+    const old = await D.peek('attendance'); if (old) await D.bump(name, old);
+    await D.bump('attendance|moved', year);
+  }
+  return { year, name };
+}
+/* is this learner number free (no person has it as their number or as their record key)? */
+export async function attFree(D, att, exceptId = '') {
+  const [byKey, byNo] = await Promise.all([D.get('trainees', att), D.byField('trainees', 'att', att)]);
+  return (!byKey || byKey.id === exceptId) && !byNo.some(r => r.id !== exceptId);
+}
+/* the next k free learner numbers */
+export async function nextAtts(c, k = 1) {
+  const { year, name } = await attCounter(c), D = c.D;
+  const first = k === 1 ? await D.seq(name) : await D.seqN(name, k);
+  const out = Array.from({ length: k }, (_, i) => S.learnerNo(year, first + i));
+  const [byKey, byNo] = await Promise.all([D.getMany('trainees', out), D.inList('trainees', 'att', out, ['att'])]);
+  const taken = new Set([...byKey.map(r => r.id), ...byNo.map(r => r.data.att)]);
+  for (let i = 0; i < out.length; i++) {
+    for (let tries = 0; taken.has(out[i]) && tries < 200; tries++) { const n = S.learnerNo(year, await D.seq(name)); if (!taken.has(n) && await attFree(D, n)) out[i] = n; }
+    taken.add(out[i]);
+  }
+  return out;
 }
 
 /* temporary account -> registered candidate (new learner number); returns the new record */
 export async function completeTemp(c, t, { fin, phone, docType }) {
-  const D = c.D, year = new Date(c.now()).getUTCFullYear(), att = S.learnerNo(year, await D.seq('attendance'));
+  const D = c.D, [att] = await nextAtts(c);
   if (t.fin && t.fin === fin) await D.put('fins', [{ id: fin, data: { id: att } }]);          // the office already gave the FIN
   else try { await D.insert('fins', fin, { id: att }); } catch (/** @type {any} */ e) { if (e instanceof H && e.message === 'dup') throw new H(409, 'finExists'); throw e; }
   const login = await claimLogin(D, 'trainee', att, att);

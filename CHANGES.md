@@ -599,3 +599,46 @@ Tests: `test/round18.test.mjs`. `npm test`: 117 tests.
 **Browser tests** (`e2e/flows.e2e.mjs`, `npm run e2e`): office sign-in and every menu page; certificate list, preview
 and the public QR page; trainer, company and candidate portals with the bell; an online exam where the network drops
 before the hand-in (answers kept on the phone, sent when it is back, all counted); wrong password; phone width.
+
+## Round 22 — learner numbers, numbering per year, notification controls
+**Change a candidate's learner (attendance) number** — Candidate → Change number (admin and superadmin).
+- For people from earlier years: give them back their old number. Sessions, results, signatures and certificates stay
+  attached (the record keeps its key). The sign-in name follows the number when it was the number; the password stays.
+- Certificates keep the number printed on them, unless "also change it on this person's certificates" is ticked: then
+  they change too, and signed ones must be signed again (their content changed).
+- A number already used by someone else is refused. The person can still be found by their previous number.
+
+**Numbering**
+- Learner numbers now restart at 00001 every 1 January (Baku time), like certificate numbers; this year continues from
+  the current number. Every counter only goes up: numbers of deleted people or certificates are never given again
+  (gaps are expected, and required for certificates: a number that was printed must never point at someone else).
+- A number typed in by hand (e.g. an earlier year's, or this year's next one) is skipped when the counter reaches it,
+  in single registration, approvals, first sign-in of temporary accounts and Excel import.
+
+**Notification panel** (every portal)
+- To-dos (certificates to sign, approvals, requests, …): ⏰ "remind me tomorrow" hides one until the next day; it comes
+  back at once if more of that work arrives, and disappears by itself when the work is done.
+- Events: ✓ removes one, "Clear all" empties the list, 🔕 never shows that kind again (information only: things that need
+  action cannot be muted). "Show everything again" undoes all of it. Each person's choices are their own.
+- Events tied to work vanish for everybody once it is handled: a new company request (when its status changes), a
+  candidate to approve (when decided), a new message (when read or answered), in the portals too.
+- schema.sql: one new index for this (optional; run it when convenient, the app works without it).
+- Tests: 137 pass; browser tests: 7 pass.
+
+## Round 23 — messages between office users; clearing conversations; deleted accounts
+**Team messages** (Admin → Messages, every office role, approvers and auditors included)
+- "New message" → Colleague: a one-to-one conversation with another office user. Unread count on the menu and in the
+  bell; the "new message" event disappears once read. Each person edits or deletes only their own messages.
+- "Clear conversation" clears it for me only; once both people have cleared it, those messages are deleted for good.
+- Admins and the superadmin see team and portal conversations in one list (👥 colleague, 🎓 trainer, 🏢 company, 👤 candidate).
+
+**Portal conversations**
+- Trainers, companies and candidates can clear the conversation on their side (🔔 → Messages → Clear conversation);
+  the training centre keeps its copy. Office: "Delete conversation" removes it for everybody (as before).
+
+**Bug fixed: deleted accounts left their messages behind**
+- Deleting a trainer, company or candidate (one or many) now removes their conversation, its messages, their bell
+  events and panel settings. Deleting an office user removes their team conversations.
+- Conversations left over from accounts deleted earlier disappear (and are removed) the next time Messages is opened.
+- A temporary candidate account that becomes a registered one keeps its conversation.
+- Tests: 140 pass; browser tests: 8 pass.
