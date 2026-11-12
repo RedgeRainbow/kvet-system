@@ -167,6 +167,19 @@ test('team messages: an approver writes to the superadmin, who reads and answers
   await a.close(); await b.close();
 });
 
+test('signature reminder: beside the menu, ✕ puts it off until tomorrow, also after reloading', async () => {
+  const { p, errors, close } = await page();
+  await signIn(p, '/admin.kvet', STAFF.email, STAFF.password);
+  await p.waitForSelector('#signPill .sp-go', { timeout: 10000 });
+  const box = await p.$eval('#signPill', el => el.getBoundingClientRect().left), nav = await p.$eval('#nav', el => el.getBoundingClientRect().right);
+  assert.ok(box >= nav, 'does not cover the menu');
+  await p.click('#signPill .sp-x'); await p.waitForSelector('#signPill', { state: 'detached' });
+  await p.reload(); await p.waitForSelector('#nav'); await p.waitForTimeout(2500);
+  assert.equal(await p.$('#signPill'), null, 'still put off after reloading');
+  assert.deepEqual(errors, [], errors.join('\n'));
+  await close();
+});
+
 test('wrong password: a clear message, no sign-in', async () => {
   const { p, errors, close } = await page();
   await signIn(p, '/admin.kvet', STAFF.email, 'wrong-password');

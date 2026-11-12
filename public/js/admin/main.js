@@ -1,5 +1,5 @@
 import { mountPortal, topbar } from '../portal.js';
-import { A, load, can, view, api, S, $, $$, esc, t, fail } from './lib.js';
+import { A, load, can, view, api, S, $, $$, esc, t, fail, toast } from './lib.js';
 import { icon } from '../icons.js';
 import { live } from '../live.js';
 
@@ -65,7 +65,11 @@ mountPortal({ kind: 'staff', titleKey: 'portalStaff', async boot({ app, signOut,
     await Promise.all([
       can('issue') && api('/issue/queue', q).then(r => setCnt('issue', r.list.filter(x => x.outcome === 'PASS').length)).catch(() => {}),
       can('approve') && api('/approvals', q).then(r => { A.apprCount = r.tests.length + r.materials.length + r.certs.length + (r.candidates || []).length + (r.links || []).length; setCnt('approvals', A.apprCount + (A.unsignedCerts || 0)); }).catch(() => {}),
-      A.role !== 'emergency' && api('/notify', q).then(r => setCnt('messages', r.msgs || 0)).catch(() => {}),
+      A.role !== 'emergency' && api('/notify', q).then(r => {
+        setCnt('messages', r.msgs || 0);
+        // the signature reminder follows the bell: put off until tomorrow there (or with its ✕) = hidden here too
+        A.signTodo = (r.todo || []).find(x => x.k === 'nCertsToSign') || null; A.signKnown = true; document.dispatchEvent(new Event('kvet:unsigned'));
+      }).catch(() => {}),
       can('requests') && api('/requests', q).then(r => setCnt('requests', r.list.filter(x => x.status === 'new').length)).catch(() => {}),
       // certificates waiting for a signature: the superadmin and approvers sign them
       can('cert.sign') && api('/certs?unsigned=1&size=0&counts=0', q).then(r => { A.unsignedCerts = r.total || 0; setCnt('certificates', A.unsignedCerts); if (can('approve')) setCnt('approvals', (A.apprCount || 0) + A.unsignedCerts); document.dispatchEvent(new Event('kvet:unsigned')); }).catch(() => {}),
@@ -73,12 +77,22 @@ mountPortal({ kind: 'staff', titleKey: 'portalStaff', async boot({ app, signOut,
   }
   document.addEventListener('kvet:me', () => load().catch(() => {}));
   document.addEventListener('kvet:badges', () => { badges(true).catch(() => {}); });   // a page changed what the menu counts (e.g. messages read)
-  // superadmin / approver: certificates waiting for their signature, a reminder on every page (bottom left)
+  // superadmin / approver: certificates waiting for their signature, a reminder on every page (bottom of the page area).
+  // ✕ = "remind me tomorrow" (the same as ⏰ in the bell); it comes back tomorrow, or sooner when more certificates arrive.
   const signPill = () => {
     let p = $('#signPill'); const n = A.unsignedCerts || 0, to = can('approve') ? '#/approvals' : '#/certificates/st=UNSIGNED', here = location.hash.startsWith(to);
-    if (!n || here) return p?.remove();
-    if (!p) { p = Object.assign(document.createElement('a'), { id: 'signPill', className: 'btn sign-pill', href: to }); document.body.append(p); }
-    p.textContent = '✍ ' + t('certsToSign', n);
+    if (!n || here || (A.signKnown && !A.signTodo)) return p?.remove();
+    if (!p) {
+      p = Object.assign(document.createElement('div'), { id: 'signPill', className: 'sign-pill' });
+      p.innerHTML = `<a class="sp-go" href="${to}"></a><button type="button" class="sp-x" aria-label="${esc(t('nLater'))}" title="${esc(t('nLater'))}">✕</button>`;
+      document.body.append(p);
+      $('.sp-x', p).onclick = async () => {
+        const k = A.signTodo; p?.remove(); A.signTodo = null; A.signKnown = true;
+        if (!k?.key) return;
+        try { await api('/notify/act', { kind: 'staff', body: { op: 'later', key: k.key, n: k.n || 0 }, quiet: true }); toast(t('nLaterDone'), 'ok'); document.dispatchEvent(new CustomEvent('kvet:wrote')); } catch (/** @type {any} */ e) { fail(e); }
+      };
+    }
+    $('.sp-go', p).setAttribute('href', to); $('.sp-go', p).textContent = '✍ ' + t('certsToSign', n);
   };
   document.addEventListener('kvet:unsigned', signPill); window.addEventListener('hashchange', signPill);
   window.__badges = () => badges(true); window.onhashchange = route; await route();

@@ -642,3 +642,10 @@ before the hand-in (answers kept on the phone, sent when it is back, all counted
 - Conversations left over from accounts deleted earlier disappear (and are removed) the next time Messages is opened.
 - A temporary candidate account that becomes a registered one keeps its conversation.
 - Tests: 140 pass; browser tests: 8 pass.
+
+## Round 23b — signature reminder; Cloudflare build step
+- The "certificates waiting for your signature" reminder (bottom of the screen) follows the bell: when it is put off
+  until tomorrow (⏰ in the bell, or the new ✕ on the reminder itself) it stays hidden, also after reloading, until
+  tomorrow or until more certificates arrive. It no longer covers the bottom of the menu.
+- `npm run build` exists (prepares the preload list), so a Cloudflare build command of `npm run build` works.
+- Browser tests: 9 pass.

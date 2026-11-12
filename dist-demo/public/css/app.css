@@ -240,7 +240,9 @@ label.busy{opacity:.5;pointer-events:none}
 @font-face{font-family:"Calibri Light";src:local("Calibri Light"),local("Calibri-Light"),url(/fonts/Carlito-Regular.woff) format("woff");font-weight:400;font-display:swap}
 
 /* certificates waiting for a signature (superadmin / approver): reminder on every page */
-.sign-pill{position:fixed;left:18px;bottom:18px;z-index:60;background:var(--warn);border-color:var(--warn);color:#fff;box-shadow:var(--sh);border-radius:999px}
+.sign-pill{position:fixed;left:248px;bottom:18px;z-index:25;display:flex;align-items:stretch;background:var(--warn);color:#fff;box-shadow:var(--sh);border-radius:999px;overflow:hidden;font-weight:600;font-size:14px}
+.sign-pill .sp-go{color:#fff;text-decoration:none;padding:9px 6px 9px 16px}.sign-pill .sp-go:hover{text-decoration:underline}
+.sign-pill .sp-x{background:none;border:0;border-left:1px solid rgba(255,255,255,.35);color:#fff;cursor:pointer;padding:0 12px;font-size:13px}.sign-pill .sp-x:hover{background:rgba(0,0,0,.12)}
 @media(max-width:860px){.sign-pill{left:10px;bottom:10px}}
 
 /* notifications (bell) */

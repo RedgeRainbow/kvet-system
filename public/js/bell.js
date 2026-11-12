@@ -60,7 +60,7 @@ function notesHtml() {
 }
 /* one panel action, then the list again */
 async function panelAct(body, undo) {
-  try { await api(base(K) + '/notify/act', { kind: K, body, quiet: true }); await poll(); draw(); if (undo) toast(undo, 'ok'); } catch (/** @type {any} */ e) { fail(e); }
+  try { await api(base(K) + '/notify/act', { kind: K, body, quiet: true }); await poll(); draw(); if (undo) toast(undo, 'ok'); document.dispatchEvent(new CustomEvent('kvet:badges')); } catch (/** @type {any} */ e) { fail(e); }
 }
 /* edit one message: resolves the new text, or null */
 export const editText = text => new Promise(res => { const m = openModal({ title: t('msgEdit'), html: `<textarea id="metx" rows="4" maxlength="2000" style="width:100%">${esc(text)}</textarea>`,
