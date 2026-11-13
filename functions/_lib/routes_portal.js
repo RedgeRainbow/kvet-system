@@ -1,8 +1,8 @@
 /* Trainer, trainee and company portal routes. Portals never receive the ID/FIN. */
 import { aiCfg, aiReady } from './ai.js';
-import { H, S, str, need, num, bool, audit, enrId, getSettings, assetsOut, publicSettings, personLite, enrOf, saveEnr, enrsOfSession, sessionRow, enrsFor, sessionsOf, daysBefore } from './core.js';
-import { confirmFor, saveEvaluation, savePractical, loadEnrolled, rollCall, openDocs, docsGate } from './ops.js';
-import { pbk, rnd, same, mkTok } from './auth.js';
+import { H, S, str, need, num, bool, audit, enrId, getSettings, assetsOut, assetsFor, publicSettings, personLite, enrOf, saveEnr, enrsOfSession, sessionRow, enrsFor, sessionsOf, daysBefore } from './core.js';
+import { confirmFor, confirmAll, saveEvaluation, savePractical, loadEnrolled, rollCall, openDocs, docsGate } from './ops.js';
+import { pbk, rnd, same, mkTok, rounds } from './auth.js';
 import { sign, slot, sessionSigns } from './signs.js';
 import { certSt } from './search.js';
 import { createTrainee, claimFin } from './routes_people.js';
@@ -40,7 +40,7 @@ const trainerRoutes = {
     const cos = (await c.D.all('companies')).map(r => r.data).filter(x => x.on !== false), coName = new Map(cos.map(x => [x.id, x.name]));
     const mine = new Set((await c.D.byField('sessions', 'tid', c.me.id)).flatMap(r => r.data.traineeIds || []));
     const list = [];
-    for (const id of mine) { const x = await c.D.get('trainees', id); if (x && x.on !== false) list.push({ ...personLite(x), company: S.isPrivateCompany(coName.get(x.co || ''), x.co) ? '' : coName.get(x.co || '') || '' }); }
+    for (const x of await Promise.all([...mine].map(id => c.D.get('trainees', id)))) { if (x && x.on !== false) list.push({ ...personLite(x), company: S.isPrivateCompany(coName.get(x.co || ''), x.co) ? '' : coName.get(x.co || '') || '' }); }
     return { list, companies: cos.map(x => ({ id: x.id, name: x.name })).sort((a, b) => a.name.localeCompare(b.name)) };
   } },
   'GET /portal/trainer/lookup': { auth: 'trainer', async fn(c) {
@@ -65,8 +65,9 @@ const trainerRoutes = {
     const add = [...new Set((b.add || []).map(x => str(x, 60)))].slice(0, 200), rem = [...new Set((b.remove || []).map(x => str(x, 60)))].slice(0, 200);
     for (const t of await Promise.all(add.map(id => c.D.get('trainees', id)))) need(t && t.on !== false, 'badInput');
     for (const id of rem) { const e = await c.D.get('enr', enrId(s.id, id)); if (e && (e.fb || e.ev || e.prac || e.exam || e.test || e.doh || e.final)) throw new H(409, 'hasData', { tid: id }); await c.D.del('enr', enrId(s.id, id)); }   // attendance alone does not block removal from the session
-    s.traineeIds = [...new Set([...(s.traineeIds || []).filter(x => !rem.includes(x)), ...add])].slice(0, 500);
-    await c.D.put('sessions', [{ id: s.id, data: s }]); await audit(c, 'session.trainees', `${s.id} +${add.length} -${rem.length}`, { entity: { kind: 'session', id: s.id, label: s.date } });
+    const next = [...new Set([...(s.traineeIds || []).filter(x => !rem.includes(x)), ...add])]; need(next.length <= 500, 'sessionFull', 409);
+    const fresh = add.filter(id => !(s.traineeIds || []).includes(id)); s.traineeIds = next;
+    await c.D.put('sessions', [{ id: s.id, data: s }]); await audit(c, 'session.trainees', `${s.id} +${add.length} -${rem.length}${fresh.length ? ' · added ' + fresh.join(' ') : ''}${rem.length ? ' · removed ' + rem.join(' ') : ''}`, { entity: { kind: 'session', id: s.id, label: s.date } });
     return { ok: 1, count: s.traineeIds.length };
   } },
 
@@ -86,7 +87,7 @@ const trainerRoutes = {
         fbAt: e.fb?.at || null, tbtAck: e.tbtAck?.at || null });
     }
     const signs = await sessionSigns(c, s.id);
-    return { today, session: sessionRow(s, enrs, today), signs, todo: trainerTodo(s, enrs, signs, today), multi: S.multiDay(s), finalDay: S.finalDay(s), docsReady: S.docsReady(s), blank: blankLite(blank), sheet, materials: mats, trainees, test: s.examMode === 'bank' ? await c.D.get('tests', s.examId || '') : null,
+    return { today, session: sessionRow(s, enrs, today), signs, todo: trainerTodo(s, enrs, signs, today), multi: S.multiDay(s), finalDay: S.finalDay(s), docsReady: S.docsReady(s), blank: blankLite(blank), sheet, materials: mats, trainees, test: s.examMode === 'bank' ? await c.D.get('tests', s.examId || '').then(x => x && { id: x.id, title: x.title, questions: (x.questions || []).length }) : null,   // name and size only: the questions and the key are read with GET /portal/trainer/test (recorded)
       trainer: { id: c.me.id, ...names(c.me) }, info: st.company || {}, assets: await assetsOut(c.D, st) };
   } },
 
@@ -118,8 +119,7 @@ const trainerRoutes = {
   /* the trainer confirms attendance for every candidate of the session in one go */
   'POST /portal/trainer/confirm-all': { auth: 'trainer', async fn(c) {
     const b = await c.body(), s = await c.D.get('sessions', str(b.sid, 60)); need(s && s.tid === c.me.id, 'noRec', 404);
-    let n = 0; for (const tid of s.traineeIds || []) { const e = await enrOf(c.D, s.id, tid); if (!e.att) { await confirmFor(c, s.id, tid); n++; } }
-    return { confirmed: n };
+    return { confirmed: await confirmAll(c, s) };
   } },
   /* the trainer signs a practical sheet again (e.g. after the office corrected it) */
   'POST /portal/trainer/sign/prac': { auth: 'trainer', async fn(c) {
@@ -211,7 +211,7 @@ const traineeRoutes = {
     const certs = certs0.filter(x => x.st !== 'REVOKED');
     return { today, company: co && !S.isPrivateCompany(co.name, co.id) ? co.name : '', me: { ...personLite(me), login: me.login, ...names(me), phone: me.phone || '', email: me.email || '' },
       ai: aiFlags,
-      sessions, certs: viaCompany ? certs.map(certFact) : certs, certsViaCompany: viaCompany, info: st.company || {}, assets, settings: publicSettings(st) };
+      sessions, certs: viaCompany ? certs.map(certFact) : certs.map(({ by, sk, exp, cox, approval, rem, ...x }) => x), certsViaCompany: viaCompany, info: st.company || {}, assets: assetsFor(assets, viaCompany ? [] : certs.map(x => x.sigId || '')), settings: publicSettings(st) };
   } },
 
   'POST /portal/trainee/feedback': { auth: 'trainee', async fn(c) {
@@ -240,14 +240,22 @@ const traineeRoutes = {
 
 /* ------------------------------------------------------- own password (all portals) */
 const PCOL = { trainer: 'trainers', trainee: 'trainees', company: 'companies' };
-const passwordRoutes = Object.fromEntries(Object.keys(PCOL).map(kind => [`POST /portal/${kind}/password`, { auth: kind, async fn(c) {
+const passwordRoutes = Object.fromEntries(Object.keys(PCOL).flatMap(kind => [[`POST /portal/${kind}/password`, { auth: kind, async fn(c) {
   const b = await c.body(), acc = await c.D.get(PCOL[kind], c.me.id), nw = String(b.next || '');
-  need(acc && acc.salt && same(await pbk(String(b.current || ''), acc.salt), acc.hash), 'badPassword', 400);
+  need(acc && acc.salt && same(await pbk(String(b.current || ''), acc.salt, acc.it), acc.hash), 'badPassword', 400);
   need(nw.length >= 8 && nw.length <= 100 && /[A-Za-z]/.test(nw) && /\d/.test(nw), 'weakPassword');
-  acc.salt = rnd(16); acc.hash = await pbk(nw, acc.salt); acc.pv = (acc.pv || 0) + 1;      // signs out every other device
+  need(nw !== String(b.current || ''), 'samePassword');                              // a "change" to the same password is none
+  acc.salt = rnd(16); acc.it = rounds(c.env); acc.hash = await pbk(nw, acc.salt, acc.it); acc.pv = (acc.pv || 0) + 1;      // signs out every other device
+  acc.pwAt = new Date(c.now()).toISOString();                                        // the person chose this password (see settings.forcePw)
   await c.D.put(PCOL[kind], [{ id: acc.id, data: acc }]); await audit(c, 'password.change', `${kind} ${acc.login}`);
   return { token: await mkTok(c.env, { r: kind, id: acc.id, pv: acc.pv }) };
-} }]));
+} }],
+/* Sign out: every token of this account stops working (this device and any other), not just the copy in this browser. */
+[`POST /portal/${kind}/logout`, { auth: kind, async fn(c) {
+  const acc = await c.D.get(PCOL[kind], c.me.id); if (!acc) return { ok: true };
+  acc.pv = (acc.pv || 0) + 1; await c.D.put(PCOL[kind], [{ id: acc.id, data: acc }]); await audit(c, 'logout', `${kind} ${acc.login}`).catch(() => {});
+  return { ok: true };
+} }]]));
 
 /* ------------------------------------------------------------------ company */
 const REQ_KINDS = ['training', 'renewal'];
@@ -290,7 +298,7 @@ const companyRoutes = {
   } },
   'GET /portal/company/cert': { auth: 'company', async fn(c) {
     const x = await c.D.get('certs', S.normCertNo(str(c.url.searchParams.get('no'), 60))); need(x && x.co === c.me.id && !x.revoked && S.certDelivered(x), 'noRec', 404);
-    const st = await getSettings(c.D), { by, sk, exp, cox, ...o } = x; return { cert: { ...o, st: certSt(x, c.today(), st.soonDays ?? S.SOON_DAYS) } };
+    const st = await getSettings(c.D), { by, sk, exp, cox, approval, rem, ...o } = x; return { cert: { ...o, st: certSt(x, c.today(), st.soonDays ?? S.SOON_DAYS) } };
   } },
   'GET /portal/company/home': { auth: 'company', async fn(c) {
     const co = c.me, st = await getSettings(c.D), today = c.today();
@@ -299,11 +307,13 @@ const companyRoutes = {
     // viewing / PDF comes from GET /portal/company/cert. Years of history stay out of the page.
     const soon = st.soonDays ?? S.SOON_DAYS;
     const certs = (await c.D.query('certs', { where: [['co', 'eq', co.id], ['revoked', 'null', true], ['renewed', 'null', true]] })).rows.map(r => r.data).filter(S.certDelivered);
-    const live = certs.map(({ by, vh, sk, exp, cox, snap, ...x }) => ({ ...x, st: certSt(x, today, soon), snap: snap && { names: snap.names, foreign: snap.foreign, att: snap.att, company: snap.company, blank: { name: snap.blank?.name || '' } } }));   // no staff e-mail addresses in the company portal
+    const live = certs.map(({ by, vh, sk, exp, cox, approval, rem, snap, ...x }) => ({ ...x, st: certSt(x, today, soon), snap: snap && { names: snap.names, foreign: snap.foreign, att: snap.att, company: snap.company, blank: { name: snap.blank?.name || '' } } }));   // no staff e-mail addresses in the company portal
     const nBy = new Map(); for (const x of live) nBy.set(x.tid, (nBy.get(x.tid) || 0) + 1);
     return { today, company: { id: co.id, name: co.name, contactPerson: co.contactPerson || '', phone: co.phone || '', email: co.email || '', reqOptional: !!co.reqOptional },
       trainees: trainees.map(t => ({ ...personLite(t), certs: nBy.get(t.id) || 0 })),
-      certs: live, counters: S.certCounters(live), assets: await assetsOut(c.D, st), info: st.company || {}, settings: publicSettings(st) };
+      certs: live, counters: S.certCounters(live), info: st.company || {}, settings: publicSettings(st),
+      // signatures of every certificate of this company (older ones can still be opened and printed)
+      assets: assetsFor(await assetsOut(c.D, st), (await c.D.query('certs', { where: [['co', 'eq', co.id]], fields: ['sigId'] })).rows.map(r => /** @type {any} */ (r.data).sigId || '')) };
   } },
 };
 

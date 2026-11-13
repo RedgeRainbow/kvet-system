@@ -18,14 +18,14 @@ async function setup() {
 }
 const login = async (call, r) => (await call('POST', '/login', { body: { role: 'trainee', login: r.trainee.login, password: r.creds.password } })).json.token;
 
-test('candidate passwords are easy (three letters + 12345); trainers keep random ones', async () => {
+test('candidate passwords are easy to type (three letters + five random digits); trainers keep random ones', async () => {
   const { call, sa } = await setup();
   const a = (await call('POST', '/trainee/save', { token: sa, body: person() })).json;
-  assert.match(a.creds.password, /^[A-HJ-NP-Z][a-hj-km-np-z][A-HJ-NP-Z]12345$/);
+  assert.match(a.creds.password, /^[A-HJ-NP-Z][a-hj-km-np-z][A-HJ-NP-Z]\d{5}$/);
   const r = (await call('POST', '/credentials/reset', { token: sa, body: { kind: 'trainee', ids: [a.trainee.id] } })).json.list[0];
-  assert.match(r.password, /^[A-Z][a-z][A-Z]12345$/); assert.ok(await login(call, { trainee: a.trainee, creds: { password: r.password } }));
+  assert.match(r.password, /^[A-Z][a-z][A-Z]\d{5}$/); assert.ok(await login(call, { trainee: a.trainee, creds: { password: r.password } }));
   const tr = (await call('POST', '/trainer/save', { token: sa, body: person({ name: 'Elçin', fin: 'TRN9999' }) })).json;
-  assert.doesNotMatch(tr.creds.password, /12345$/);
+  assert.doesNotMatch(tr.creds.password, /^[A-Z][a-z][A-Z]\d{5}$/);
 });
 
 test('staff change their own password (current password checked); the old one stops working', async () => {
@@ -273,7 +273,7 @@ test('import without ID/FIN: 300 people in a few database calls per part, same n
   const rows = Array.from({ length: 300 }, (_, i) => ({ row: i + 2, name: 'Ad' + (i % 150), surname: 'Soyad', father: 'Ata oğlu' }));
   let made = [];
   for (let i = 0; i < rows.length; i += 50) made.push(...(await call('POST', '/trainee/import', { token: sa, body: { rows: rows.slice(i, i + 50) } })).json.results);
-  assert.equal(made.filter(r => r.status === 'created').length, 300); assert.ok(made.every(r => /^[A-Z][a-z][A-Z]12345$/.test(r.password)));
+  assert.equal(made.filter(r => r.status === 'created').length, 300); assert.ok(made.every(r => /^[A-Z][a-z][A-Z]\d{5}$/.test(r.password)));
   assert.equal(new Set(made.map(r => r.login)).size, 300); assert.ok(made.slice(150).every(r => r.sameName >= 1), 'the second Ad0… is reported');
 });
 

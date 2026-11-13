@@ -22,8 +22,47 @@ const fill = (col, id, data) => (ID_COLS.has(col) && data && typeof data === 'ob
 import { foldText } from '../../public/js/shared.js';
 import { shapeError, repairRecord } from './shapes.js';
 
+/* ---------------------------------------------------------------- field-level writes
+   A record is one JSON document. Writing the whole document back means the last writer wins: when two requests change
+   DIFFERENT parts of the same record at the same moment (a trainee's answers being saved while the trainer saves the
+   evaluation), one of the two changes is silently lost. For the collections in FIELD_COLS the cache layer (cache.js)
+   therefore writes only what the request changed, as a list of paths, and the database applies it in one statement
+   (schema.sql: patch_record).
+     set:   [{ p: ['ev'], v: {...} }, { p: ['test', 'draft'], v: {...} }]      unset: [['absent'], ['test', 'warns']]
+   Top-level fields are written whole. FINE lists the few nested fields that are written on their own when they are the
+   only part of their parent that changed (the answers saved during a test, the integrity warnings). */
+export const FIELD_COLS = new Set(['enr', 'sessions']);
+const FINE = { enr: { test: new Set(['draft', 'savedAt', 'warns']) } };
+const isObj = v => !!v && typeof v === 'object' && !Array.isArray(v);
+const sameJson = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+/** @param {string} col @param {any} base the record as this request read it (null: it did not exist) @param {any} next the record to save */
+export function diffOps(col, base, next) {
+  const set = [], unset = [], b0 = isObj(base) ? base : {};
+  for (const k of new Set([...Object.keys(b0), ...Object.keys(next)])) {
+    const a = b0[k], b = next[k];
+    if (b === undefined) { if (a !== undefined) unset.push([k]); continue; }
+    if (a !== undefined && sameJson(a, b)) continue;
+    const fine = FINE[col]?.[k];
+    if (fine && isObj(a) && isObj(b)) {
+      const ch = [...new Set([...Object.keys(a), ...Object.keys(b)])].filter(j => !(a[j] !== undefined && b[j] !== undefined && sameJson(a[j], b[j])) && !(a[j] === undefined && b[j] === undefined));
+      if (ch.length && ch.every(j => fine.has(j))) { for (const j of ch) (b[j] === undefined ? unset.push([k, j]) : set.push({ p: [k, j], v: b[j] })); continue; }
+    }
+    set.push({ p: [k], v: b });
+  }
+  return { set, unset };
+}
+/* the same result as patch_record in the database (used by the in-memory store, so the tests exercise the same rules) */
+export function applyOps(doc, set, unset) {
+  const d = structuredClone(doc);
+  for (const { p, v } of set) { let o = d; for (const k of p.slice(0, -1)) o = isObj(o) ? o[k] : undefined; if (isObj(o)) o[p.at(-1)] = structuredClone(v); }
+  for (const p of unset) { let o = d; for (const k of p.slice(0, -1)) o = isObj(o) ? o[k] : undefined; if (isObj(o)) delete o[p.at(-1)]; }
+  return d;
+}
+
 export function supabaseStore(env) {
   /** @type {any} */ let rpcIn = null;                  // records_in available? (null = not tried yet)
+  /** @type {any} */ let rpcPatch = null;               // patch_record available?
+  /** @type {any} */ let rpcPatchN = null;              // patch_records available?
   const K = env.SUPABASE_SERVICE_KEY;
   /** @type {Record<string, string>} */
   const A = K.startsWith('sb_') ? { apikey: K } : { apikey: K, authorization: 'Bearer ' + K };
@@ -103,10 +142,26 @@ export function supabaseStore(env) {
       const res = spec.count ? await callN(base) : { rows: await call(base), total: null };
       return { rows: res.rows.map(r => ({ id: r.id, data: shape(r) })), total: res.total };
     },
-    prefix: (col, p) => page(`col=eq.${col}&id=like.${q(p)}*`),
+    prefix: (col, p) => page(`col=eq.${col}&id=like.${q(String(p).replace(/[\\%_]/g, m => '\\' + m))}*`),   // % and _ in the prefix are letters, not wildcards
     async put(col, rows) {
       for (let i = 0; i < rows.length; i += 500)
         await call('records?on_conflict=col,id', { method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows.slice(i, i + 500).map(r => ({ col, id: r.id, data: r.data }))) });
+    },
+    /* Field-level write (see FIELD_COLS above). base = the whole record, written as it is when the row does not exist yet.
+       Until schema.sql has been run again (patch_record missing) it falls back to the old whole-record write. */
+    async patch(col, id, base, set, unset) {
+      if (rpcPatch !== false) try {
+        await call('rpc/patch_record', { method: 'POST', body: JSON.stringify({ p_col: col, p_id: id, p_base: base, p_set: set, p_unset: unset }) }); rpcPatch = true; return;
+      } catch (/** @type {any} */ e) { if (!(e.status === 404 || /PGRST202/.test(e.body || ''))) throw e; rpcPatch = false; }
+      await this.put(col, [{ id, data: base }]);
+    },
+    /* the same for many records of one collection in ONE call: rows = [{ id, base, set, unset }] (a roll call, closing an exam) */
+    async patchMany(col, rows) {
+      if (rpcPatchN !== false) try {
+        for (let i = 0; i < rows.length; i += 500) await call('rpc/patch_records', { method: 'POST', body: JSON.stringify({ p_col: col, p_rows: rows.slice(i, i + 500) }) });
+        rpcPatchN = true; return;
+      } catch (/** @type {any} */ e) { if (!(e.status === 404 || /PGRST202/.test(e.body || ''))) throw e; rpcPatchN = false; }
+      for (const r of rows) await this.patch(col, r.id, r.base, r.set, r.unset);
     },
     /* Plain INSERT: fails with 409 when the id already exists (used for numbers that must stay unique). */
     async insert(col, id, data) {
@@ -142,6 +197,8 @@ export function supabaseStore(env) {
     lockState: async k => { const v = await call('rpc/login_state', { method: 'POST', body: JSON.stringify({ k }) }); return v ? Date.parse(v) : 0; },
     lockFail: async (k, max, secs) => { const v = await call('rpc/login_fail', { method: 'POST', body: JSON.stringify({ k, max_fails: max, lock_secs: secs }) }); return v ? Date.parse(v) : 0; },
     lockOk: k => call('rpc/login_ok', { method: 'POST', body: JSON.stringify({ k }) }),
+    /* removes sign-in counters not touched since `before` (ISO time); returns how many */
+    lockSweep: async before => Number(await call('rpc/login_sweep', { method: 'POST', body: JSON.stringify({ before }) })) || 0,
     /* all-or-nothing restore: stage the rows, then swap them in with one database transaction */
     async restore(cols, data, ctrs) {
       await call('records_restore?col=neq.__none__', { method: 'DELETE' });
@@ -158,6 +215,7 @@ export function memoryStore() {
   const cp = x => (x === undefined ? undefined : JSON.parse(JSON.stringify(x)));
   // the same rules as the database constraints (shapes.js): a route writing a malformed record fails here in the tests
   const chk = (c, rs) => { for (const r of rs) { const e = shapeError(c, r.id, r.data); if (e) throw new H(422, 'badRecord', { detail: `${c}/${r.id}: ${e}` }); } };
+  const patch1 = async (c, id, base, set, unset) => { const next = col(c).has(id) ? applyOps(col(c).get(id), set, unset) : cp(base); chk(c, [{ id, data: next }]); col(c).set(id, next); };
   /** @param {(id: any, d?: any) => boolean} [f] */
   const rows = (c, f = () => true) => [...col(c)].filter(([id, d]) => f(id, d)).sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([id, data]) => ({ id, data: withId(c, id, cp(data)) }));
   return {
@@ -169,6 +227,8 @@ export function memoryStore() {
     prefix: async (c, p) => rows(c, id => id.startsWith(p)),
     async query(c, spec = {}) { return memQuery([...col(c)].map(([id, d]) => ({ id, data: withId(c, id, d) })), spec, cp); },
     put: async (c, rs) => { chk(c, rs); for (const r of rs) col(c).set(r.id, cp(r.data)); },
+    patch: patch1,
+    patchMany: async (c, rows) => { for (const r of [...rows].sort((a, b) => (a.id < b.id ? -1 : 1))) await patch1(c, r.id, r.base, r.set, r.unset); },
     insert: async (c, id, data) => { chk(c, [{ id, data }]); if (col(c).has(id)) throw new H(409, 'dup'); col(c).set(id, cp(data)); },
     del: async (c, id) => { col(c).delete(id); },
     delMany: async (c, ids) => { for (const id of ids) col(c).delete(id); },
@@ -183,6 +243,7 @@ export function memoryStore() {
     lockState: async k => { const l = locks.get(k); return l?.until > Date.now() ? l.until : 0; },
     lockFail: async (k, max, secs) => { const l = locks.get(k) || { n: 0, until: 0, at: 0 }; if (Date.now() - l.at > secs * 1000) l.n = 0; l.n++; l.at = Date.now(); if (l.n >= max) { l.n = 0; l.until = Date.now() + secs * 1000; } locks.set(k, l); return l.until > Date.now() ? l.until : 0; },
     lockOk: async k => { locks.delete(k); },
+    lockSweep: async before => { let n = 0; for (const [k, l] of locks) if (Math.max(l.at || 0, l.until || 0) < Date.parse(before)) { locks.delete(k); n++; } return n; },
     restore: async (cs, data, ctrs) => { if (cs.includes('audit')) throw new Error('audit cannot be restored'); for (const c of cs) { col(c).clear(); for (const x of data[c] || []) col(c).set(x.id, cp(repairRecord(c, x.id, x.data))); } for (const r of ctrs || []) counters.set(r.name, Math.max(counters.get(r.name) || 0, r.val)); },
     _dump: () => Object.fromEntries([...cols].map(([c, m]) => [c, Object.fromEntries(m)])),
   };

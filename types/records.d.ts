@@ -75,6 +75,8 @@ export interface Company {
 }
 export interface StaffRecord {
   email: string;
+  /** sessions signed out before their token expired: session id -> expiry (seconds) */
+  out?: Record<string, number>;
   expires?: string;
   mfa?: boolean;
   name?: string;

@@ -649,3 +649,40 @@ before the hand-in (answers kept on the phone, sent when it is back, all counted
   tomorrow or until more certificates arrive. It no longer covers the bottom of the menu.
 - `npm run build` exists (prepares the preload list), so a Cloudflare build command of `npm run build` works.
 - Browser tests: 9 pass.
+
+# v3.35 (audit of 12 November 2026, phases 1 to 3)
+
+**Before the deploy: run `schema.sql` again in Supabase** (it adds `patch_record`, `patch_records`, `login_sweep`, the append-only rule for the audit trail and the `updated_at` trigger; no data changes; safe to repeat). Until it has run, the server falls back to whole-record writes and the daily job reports `locks: "failed"`.
+
+| # | Item | Fix | Test |
+|---|---|---|---|
+| 1 | Two requests changing different parts of one enrolment or session overwrote each other (a hand-in lost to an evaluation saved at the same moment) | Field-level writes for `enr` and `sessions` (`store.js` FIELD_COLS, `cache.js`, `patch_record`) | phase1: both are kept |
+| 2 | 9 wrong passwords locked any account for everybody | The lock is per account and address; 40 failures from any addresses lock the account; the break-glass account is exempt from that wider limit | phase1: locks the guesser |
+| 3 | Candidate passwords: 12,167 possibilities | Three letters + five random digits. **Office decision pending**: revert the `candidatePassword` hunk to keep "12345" | phase1 |
+| 4 | A one-factor session could add an authenticator to an account that has two-factor | Enrol / activate need the second factor once it is on | phase1 |
+| 5 | Roll call, confirm-all, signing and closing an exam: about 100 database calls for 30 people | Read together, written together: 10 to 13 calls | phase2: class of 30 |
+| 6 | Bulk release sent 50 people per request | 2 per request (a release with its signature is about 20 calls) | measured |
+| 7 | A release failing after the certificate was made led to a second certificate on retry | The retry finds and finishes the first one (`release.recovered`) | phase2 |
+| 8 | A failed registration left its ID/FIN claimed by nobody | The claim is given back; claims of nobody are taken over; "Repair login registry" also repairs the ID/FIN register | phase2 |
+| 9 | The trainer's session page carried the answer key | Name and size of the test only | phase2 |
+| 10 | A trainer could overrule an automatic mark | Refused (`autoGraded`); the office still can | phase2 |
+| 11 | Signature codes: 32 bits, unlimited guessing | 48 bits (`ABCD-1234-EF56`; old codes still check); 20 unknown codes per address in 15 minutes | phase2 |
+| 12 | Broken `%`-codes and non-object JSON bodies caused server errors and error-log rows without sign-in | 404 / 400, nothing logged | phase2 |
+| 13 | Sign-in counters were never deleted | Daily job: `login_sweep` | phase2 |
+| 14 | Reminders for certificates not approved yet; staff e-mail on portal certificates | Skipped; removed | phase2 |
+| 15 | "Issued on" / "registered on" / audit filters used UTC days | Baku days | phase2 |
+| 16 | "Sign out" only cleared the browser | The server ends the session: portal accounts on every device (`POST /portal/<role>/logout`), staff sessions by session id (`POST /staff/logout`) | phase3; e2e |
+| 17 | Generated passwords could be kept for ever | New setting (Settings → two-factor card, **off by default**): candidates, trainers and companies must choose their own password at first sign-in and after a reset | phase3; e2e |
+| 18 | The session form replaced the candidate list | It applies only what was changed in the form (`baseIds`) | phase3 |
+| 19 | The admin who released a certificate could approve it | Refused (`ownRelease`); a superadmin may; returning is always allowed | phase3 |
+| 20 | Audit trail append-only by convention; `updated_at` never updated | Database triggers | run on PostgreSQL 16 |
+| 21 | PBKDF2 fixed at 100,000 rounds | Optional variable `PBKDF2_ROUNDS` (100,000 to 1,000,000; needs Workers Paid): accounts are re-hashed at their next sign-in | phase3 |
+| 22 | A page still loading when the person moved on replaced the new page with "Server error" (admin) | Its result and errors are dropped | e2e (was intermittent) |
+| 23 | Scheduler test key only in the address, compared directly | Header `x-cron-key`, constant-time compare | — |
+| 24 | A company could test any number of ID/FINs for "already registered" | 300 a day per company, then 429 `finLimit` | phase3 |
+| 25 | Every portal user received the stamp and every signature image the centre ever used | The stamp only with a certificate, and only the signatures of one's own certificates | phase3 |
+| 26 | A trainer's additions to a session were logged as a count; more than 500 were cut off silently | Logged person by person; refused with `sessionFull` | — |
+| 27 | An external auditor could list staff e-mail addresses in messages | Names and roles only | phase3 |
+| 28 | A backup too big for one request would fail without warning | Past 30 MB the superadmins get a notification and an audit row (`backup.large`) | — |
+
+Not in this version (see the audit report, section 6): certificates drawn on the server, a split / encrypted backup format, the audit page filtered in the database, `package-lock.json` (run `npm install` and commit it), a narrower `connect-src`, reformatting of the server code.

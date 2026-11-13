@@ -1,5 +1,5 @@
 /* Staff routes: bootstrap state, settings, uploads, numbering, users, backups, audit log, cameras, deletes, starter templates. */
-import { H, S, J, str, num, need, bool, uid, audit, getSettings, assetsOut, publicSettings, traineeOut, trainerOut, stripSecret, sessionRow, enrsFor, daysBefore, RECENT_DAYS, queryIn, diff, accredKeys } from './core.js';
+import { H, S, J, str, num, need, bool, uid, audit, getSettings, assetsOut, publicSettings, traineeOut, trainerOut, stripSecret, sessionRow, enrsFor, daysBefore, RECENT_DAYS, queryIn, diff, accredKeys, bakuDayStart, bakuDayEnd } from './core.js';
 import { reindex, SK_VERSION } from './search.js';
 import { rnd, seal, unseal, loginKey } from './auth.js';
 import { runReminders, runRetention } from './jobs.js';
@@ -7,6 +7,7 @@ import { KINDS, loadWorld, loadWorldFor, newPlan, runKind, impact, total, applyP
 import { SEED_BLANKS, SEED_SHEETS } from './seed.js';
 import { suggestNo } from './routes_training.js';
 import { notify, doneNotes } from './routes_notify.js';
+import { rebuildFins } from './routes_people.js';
 import { forgetStaff } from './routes_dm.js';
 
 export const DCOLS = ['blanks', 'sheets', 'tests', 'groups', 'kb', 'materials', 'companies', 'trainers', 'trainees', 'sessions', 'enr', 'rel', 'signs', 'certs', 'archive', 'retired', 'fins', 'logins', 'requests', 'candreq', 'libdocs', 'cogroups', 'notes', 'nseen', 'threads', 'msgs', 'links', 'settings', 'sigs', 'cams', 'snaps', 'audit'];
@@ -27,8 +28,16 @@ async function dump(c) {
 }
 async function makeBackup(c, tag = '') {
   const key = `backups/kvet-${new Date(c.now()).toISOString().replace(/[:.]/g, '-')}${tag}.json`;
-  await c.B.put(key, JSON.stringify(await dump(c)), { httpMetadata: { contentType: 'application/json' } }); return key;
+  const body = JSON.stringify(await dump(c)); await c.B.put(key, body, { httpMetadata: { contentType: 'application/json' } });
+  // The whole backup is built in memory (128 MB per request on Cloudflare). Past 30 MB of text the superadmins are told,
+  // once per backup, long before it can fail: time to move the audit trail out of the backup or to split it.
+  if (body.length > BACKUP_WARN) try {
+    await audit(c, 'backup.large', `${key} · ${Math.round(body.length / 1048576)} MB`);
+    await notify(c, (await c.D.all('staff')).filter(r => r.data.role === 'superadmin').map(r => 'staff:u:' + r.id), 'nBackupLarge', [Math.round(body.length / 1048576)], '#/system');
+  } catch {}
+  return key;
 }
+export const BACKUP_WARN = 30 * 1048576;
 const listBackups = async c => (await c.B.list({ prefix: 'backups/', limit: 1000 })).objects.map(o => ({ key: o.key, size: o.size, at: o.uploaded })).sort((a, b) => (a.key < b.key ? 1 : -1));
 const goodKey = k => /^backups\/[\w.-]+\.json$/.test(k || '');
 const png = buf => { const b = new Uint8Array(buf.slice(0, 4)); return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47; };
@@ -128,12 +137,13 @@ export const systemRoutes = {
     }
     if (b.fbRequired !== undefined) st.fbRequired = bool(b.fbRequired);
     if (b.certCompany !== undefined) st.certCompany = bool(b.certCompany);
+    if (b.forcePw !== undefined) { need(S.can(c.user.role, 'users'), 'forbidden', 403); st.forcePw = bool(b.forcePw); }
     if (b.mfa !== undefined) { need(S.can(c.user.role, 'users'), 'forbidden', 403); st.mfa = ['off', 'admins', 'all'].includes(b.mfa) ? b.mfa : 'off'; }
     if (b.remind) { const r = b.remind; st.remind = { on: bool(r.on), days: [...new Set((r.days || []).map(Number))].filter(d => Number.isInteger(d) && d > 0 && d <= 365).sort((a, z) => z - a).slice(0, 4), toCompany: r.toCompany !== false, toTrainee: r.toTrainee !== false }; }
     if (b.approvals) { need(S.can(c.user.role, 'users'), 'forbidden', 403); st.approvals = S.approvalsCfg({ approvals: b.approvals }); }   // superadmin decides what needs approval
     if (b.privacy) st.privacy = { consentRequired: bool(b.privacy.consentRequired), finYears: num(b.privacy.finYears, 0, 50, 0) };
     await c.D.put('settings', [{ id: 'main', data: st }]);
-    await audit(c, 'settings.save', '', { entity: { kind: 'settings', id: 'main', label: 'Settings' }, changes: [...diff(was.company, st.company, Object.keys(st.company || {})), ...diff(was.num, st.num, Object.keys(st.num || {})), ...diff({ soonDays: was.soonDays, showFather: was.showFather, dash: was.dash, fbRequired: was.fbRequired, certCompany: was.certCompany, mfa: was.mfa, remind: was.remind, privacy: was.privacy }, { soonDays: st.soonDays, showFather: st.showFather, dash: st.dash, fbRequired: st.fbRequired, certCompany: st.certCompany, mfa: st.mfa, remind: st.remind, privacy: st.privacy })] });
+    await audit(c, 'settings.save', '', { entity: { kind: 'settings', id: 'main', label: 'Settings' }, changes: [...diff(was.company, st.company, Object.keys(st.company || {})), ...diff(was.num, st.num, Object.keys(st.num || {})), ...diff({ soonDays: was.soonDays, showFather: was.showFather, dash: was.dash, fbRequired: was.fbRequired, certCompany: was.certCompany, forcePw: was.forcePw, mfa: was.mfa, remind: was.remind, privacy: was.privacy }, { soonDays: st.soonDays, showFather: st.showFather, dash: st.dash, fbRequired: st.fbRequired, certCompany: st.certCompany, forcePw: st.forcePw, mfa: st.mfa, remind: st.remind, privacy: st.privacy })] });
     return { settings: publicSettings(st) };
   } },
   'POST /numbering/set': { auth: 'staff', act: 'settings.save', async fn(c) {
@@ -246,18 +256,18 @@ export const systemRoutes = {
     await audit(c, 'user.create', `${email} ${b.role}${expires ? ' until ' + expires : ''}${u.reused ? ' (existing sign-in account linked)' : ''}`); return { ok: 1, reused: !!u.reused };
   } },
   'POST /users/update': { auth: 'staff', act: 'users', async fn(c) {
-    const b = await c.body(), x = await c.D.get('staff', str(b.id, 80)); need(x, 'noRec', 404);
-    if (b.role) { need(S.RANK[b.role] && S.ASSIGNABLE(b.role) && b.id !== c.user.id, 'badInput'); x.role = b.role; await c.D.put('staff', [{ id: b.id, data: x }]); }
-    if (b.password) { need(String(b.password).length >= 8, 'badInput'); await c.A.setPassword(b.id, b.password); }
-    if ('name' in b || 'title' in b || 'expires' in b) { if ('name' in b) x.name = str(b.name, 120); if ('title' in b) x.title = str(b.title, 120); if ('expires' in b) { if (S.isDate(b.expires)) x.expires = b.expires; else delete x.expires; } await c.D.put('staff', [{ id: b.id, data: x }]); }
+    const b = await c.body(), id = str(b.id, 80), x = await c.D.get('staff', id); need(x, 'noRec', 404);
+    if (b.role) { need(S.RANK[b.role] && S.ASSIGNABLE(b.role) && id !== c.user.id, 'badInput'); x.role = b.role; await c.D.put('staff', [{ id, data: x }]); }
+    if (b.password) { need(String(b.password).length >= 8, 'badInput'); await c.A.setPassword(id, String(b.password)); }
+    if ('name' in b || 'title' in b || 'expires' in b) { if ('name' in b) x.name = str(b.name, 120); if ('title' in b) x.title = str(b.title, 120); if ('expires' in b) { if (S.isDate(b.expires)) x.expires = b.expires; else delete x.expires; } await c.D.put('staff', [{ id, data: x }]); }
     await audit(c, 'user.update', x.email); return { ok: 1 };
   } },
   'POST /users/delete': { auth: 'staff', act: 'users', async fn(c) {
-    const b = await c.body(); need(b.id !== c.user.id, 'badInput');
-    const x = await c.D.get('staff', String(b.id));
-    await c.A.deleteUser(String(b.id)); await c.D.del('staff', String(b.id));
-    const n = await forgetStaff(c, String(b.id));                   // their team conversations go with them
-    await audit(c, 'user.delete', `${x?.email || b.id} ${x?.role || ''}${n ? ` · ${n} conversation(s)` : ''}`); return { ok: 1 };
+    const b = await c.body(), id = str(b.id, 80); need(id && id !== c.user.id, 'badInput');
+    const x = await c.D.get('staff', id); need(x, 'noRec', 404);
+    await c.A.deleteUser(id); await c.D.del('staff', id);
+    const n = await forgetStaff(c, id);                   // their team conversations go with them
+    await audit(c, 'user.delete', `${x.email || id} ${x.role || ''}${n ? ` · ${n} conversation(s)` : ''}`); return { ok: 1 };
   } },
 
   /* -------------------------------------------------------------- backups */
@@ -278,11 +288,12 @@ export const systemRoutes = {
     const before = await makeBackup(c, '-before-restore');
     // one database transaction (see apply_restore in schema.sql): either everything is restored or nothing changes
     await c.D.restore(RESTORE_COLS, d.cols, d.counters || []);
-    const logins = await rebuildLogins(c);
+    const logins = await rebuildLogins(c); await rebuildFins(c);
     await audit(c, 'backup.restore', `${b.key} · safety backup ${before} · ${logins} logins re-registered`); return { ok: 1, before };
   } },
 
-  'POST /system/logins/repair': { auth: 'staff', act: 'backup.restore', async fn(c) { const n = await rebuildLogins(c); await audit(c, 'logins.repair', String(n)); return { count: n }; } },
+  /* "Repair login registry" also repairs the ID/FIN register (claims left behind by a failed registration) */
+  'POST /system/logins/repair': { auth: 'staff', act: 'backup.restore', async fn(c) { const n = await rebuildLogins(c), fins = await rebuildFins(c); await audit(c, 'logins.repair', `${n} logins · ID/FIN register: ${fins.removed} removed, ${fins.added} added${fins.shared ? `, ${fins.shared} shared by two people` : ''}`); return { count: n, fins }; } },
 
   /* ------------------------------------------------------------ scheduled jobs */
   'POST /cron/run': { auth: 'cron', async fn(c) {
@@ -296,6 +307,8 @@ export const systemRoutes = {
     if (tasks.includes('retention')) out.retention = await runRetention(c);
     // the error log keeps 60 days; claims of handed-in tests 400 days
     { const old = new Date(c.now() - 60 * 864e5).toISOString(), ids = (await c.D.query('errlog', { where: [['at', 'lt', old]], limit: 1000, fields: ['at'] })).rows.map(r => r.id); if (ids.length) await c.D.delMany('errlog', ids); out.errlog = ids.length; }
+    // sign-in counters untouched for a day mean nothing any more (they are forgotten after 15 minutes anyway)
+    try { out.locks = (await c.D.lockSweep?.(new Date(c.now() - 864e5).toISOString())) ?? 0; } catch { out.locks = 'failed'; }
     return out;
   } },
   /* System health: what to check before a training day. Database and file storage response times (measured now), the last
@@ -353,12 +366,30 @@ export const systemRoutes = {
     const me = (await c.D.get('staff', c.user.id)) || /** @type {import('../../types/records').StaffRecord} */ ({});
     return { name: me.name || '', title: me.title || '', sigImg: me.sigKey ? '/api/asset/' + me.sigKey : '', canSignCerts: S.can(c.user.role, 'cert.sign'), enabled: c.user.mfa, aal: c.user.aal, required: pol === 'all' || (pol === 'admins' && S.RANK[c.user.role] >= S.RANK.admin) };
   } },
+  /* Setting up two-factor works with a one-factor session ONLY while the account has none yet. Once it is on, adding another
+     authenticator needs a session that passed the existing one - otherwise the password alone would be enough to add a
+     new authenticator and step past two-factor. */
+  /* Sign out. The sign-in service forgets the session (no new tokens), and the session is noted on the staff record until
+     its current token would have expired anyway, so that token is refused from now on - on a shared computer "sign out"
+     really ends the session. */
+  'POST /staff/logout': { auth: 'staff', mfa: 'skip', async fn(c) {
+    if (c.user.emergency) return { ok: true };
+    const tok = (c.req.headers.get('authorization') || '').replace(/^Bearer\s+/i, ''), nowS = Math.floor(c.now() / 1000);
+    if (c.user.sid) {
+      const s = await c.D.get('staff', c.user.id);
+      if (s) { s.out = Object.fromEntries([...Object.entries(s.out || {}).filter(([, exp]) => Number(exp) > nowS).slice(-20), [c.user.sid, c.user.exp || nowS + 3600]]); await c.D.put('staff', [{ id: c.user.id, data: s }]); }
+    }
+    await c.A.logout?.(tok); await audit(c, 'logout', c.user.email).catch(() => {});
+    return { ok: true };
+  } },
   'POST /staff/mfa/enroll': { auth: 'staff', mfa: 'skip', async fn(c) {
+    need(!c.user.mfa || c.user.aal === 'aal2', 'mfaRequired', 401);
     const tok = (c.req.headers.get('authorization') || '').slice(7);
     for (const f of await c.A.factors(tok)) if (f.status !== 'verified') await c.A.unenroll(tok, f.id);   // drop unfinished set-ups
     return c.A.enroll(tok);
   } },
   'POST /staff/mfa/activate': { auth: 'staff', mfa: 'skip', async fn(c) {
+    need(!c.user.mfa || c.user.aal === 'aal2', 'mfaRequired', 401);
     const b = await c.body(), tok = (c.req.headers.get('authorization') || '').slice(7);
     const t = await c.A.verifyFactor(tok, str(b.factorId, 80), str(b.code, 10));
     const s = await ownStaff(c); s.mfa = true; await c.D.put('staff', [{ id: c.user.id, data: s }]);
@@ -410,7 +441,8 @@ export const systemRoutes = {
       const [byId, ...months] = await Promise.all([c.D.query('audit', { where: [['eid', 'eq', entity]] }), ...recent.map(p => c.D.prefix('audit', p))]);
       const seen = new Set(); rows = [...byId.rows, ...months.flat()].filter(r => !seen.has(r.id) && seen.add(r.id));
     } else if (S.isDate(from) || S.isDate(to)) {
-      const a = S.isDate(from) ? from : '2000-01-01', z = S.isDate(to) ? to : c.today(), months = [];
+      // rows are stored under their UTC month; the first hours of a Baku day belong to the day before in UTC
+      const a = daysBefore(S.isDate(from) ? from : '2000-01-02', 1), z = S.isDate(to) ? to : c.today(), months = [];
       for (let y = Number(a.slice(0, 4)), m = Number(a.slice(5, 7)); `${y}-${S.pad(m)}` <= z.slice(0, 7) && months.length < 60; m++) { if (m > 12) { m = 1; y++; } months.push(`${y}-${S.pad(m)}`); }
       rows = (await Promise.all(months.map(p => c.D.prefix('audit', p)))).flat();        // months in parallel
     } else {
@@ -442,7 +474,7 @@ export const systemRoutes = {
     const sess = sessAll.filter(s => !s.cancelled), sid = new Set(sess.map(s => s.id)), sById = new Map(sess.map(s => [s.id, s]));
     const live = [['revoked', 'null', true], ['renewed', 'null', true]], n = where => c.D.query('certs', { where, limit: 0, count: true }).then(r => r.total || 0);
     const [enrMap, tById, issuedN, soonN, expiredN] = await Promise.all([enrsFor(c.D, [...sid], ['sid', 'tid', 'att', 'final']), queryIn(c.D, 'trainees', 'id', sess.flatMap(s => s.traineeIds || []), { fields: ['co'] }).then(l => new Map(l.map(t => [t.id, t]))),
-      n([['revoked', 'null', true], ['issuedAt', 'gte', from], ['issuedAt', 'lte', to + 'T99']]), n([...live, ['exp', 'gte', today], ['exp', 'lte', daysBefore(today, -cfg.expDays)]]), n([...live, ['exp', 'lt', today]])]);
+      n([['revoked', 'null', true], ['issuedAt', 'gte', bakuDayStart(from)], ['issuedAt', 'lt', bakuDayEnd(to)]]), n([...live, ['exp', 'gte', today], ['exp', 'lte', daysBefore(today, -cfg.expDays)]]), n([...live, ['exp', 'lt', today]])]);
     const w = { enrs: [...enrMap.values()].flat(), tById };
     const out = { from, to, today, expDays: cfg.expDays, trained: 0, passed: 0, failed: 0, pending: 0, sessions: sess.length, issued: 0, expiring: 0, expired: 0, byCompany: /** @type {any[]} */ ([]), byCourse: /** @type {any[]} */ ([]) };
     const co = new Map(), cr = new Map();

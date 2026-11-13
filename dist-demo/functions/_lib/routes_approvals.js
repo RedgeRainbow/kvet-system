@@ -48,6 +48,8 @@ export const approvalRoutes = {
     }
     if (b.kind === 'cert') {
       const no = S.normCertNo(b.id), x = await c.D.get('certs', no); need(x && x.approval?.status === 'pending', 'noRec', 404);
+      // four eyes: approving is a second person's look. Returning one's own release is fine.
+      need(!(ok && x.approval.by === by && c.user.role !== 'superadmin'), 'ownRelease', 409);
       // approving and signing in one step (approver / superadmin): the signature is checked first, so nothing is half done
       const mode = ok && ['esign', 'image'].includes(b.sign) ? b.sign : '';
       if (mode) { need(S.can(c.user.role, 'cert.sign'), 'forbidden', 403); const me = (await c.D.get('staff', c.user.id)) || /** @type {import('../../types/records').StaffRecord} */ ({}); need(String(me.name || '').trim(), 'needName', 409); if (mode === 'image') need(me.sigKey, 'needSigImage', 409); }

@@ -6,6 +6,7 @@
    - writes go to the database first, then update the cache, so a request always reads what it just wrote.
      A loaded collection is kept as a Map by id: an update costs O(1), also for bulk writes of thousands of rows.
    Records are handed out as copies: a caller changing an object it has not saved cannot affect another caller. */
+import { FIELD_COLS, diffOps } from './store.js';
 const cp = v => (v === null || v === undefined ? v : structuredClone(v));
 
 export function cached(D) {
@@ -69,7 +70,25 @@ export function cached(D) {
       const k = col + '\u0000q\u0000' + JSON.stringify(spec); if (!misc.has(k)) { const p = D.query(col, spec); misc.set(k, p); p.catch(() => misc.delete(k)); }
       return misc.get(k).then(r => ({ total: r.total, rows: copies(r.rows) }));
     },
-    async put(col, rows) { const r = await D.put(col, rows); for (const x of rows) put1(col, x.id, x.data); return r; },
+    /* Collections in FIELD_COLS (store.js): a record this request has read is written back as "what changed since I read
+       it", so a change another request made to a different part of it in the meantime is kept. Records the request did
+       not read one by one (or collections not listed) are written whole, as before. */
+    async put(col, rows) {
+      if (!FIELD_COLS.has(col) || !D.patch) { const r = await D.put(col, rows); for (const x of rows) put1(col, x.id, x.data); return r; }
+      const whole = [], part = [];
+      for (const x of rows) {
+        const k = key(col, x.id);
+        if (!one.has(k)) { whole.push(x); continue; }
+        const base = await one.get(k).catch(() => undefined);
+        if (base === undefined) { whole.push(x); continue; }
+        const { set, unset } = diffOps(col, base, x.data);
+        if (set.length || unset.length || base === null) part.push({ id: x.id, base: x.data, set, unset });
+      }
+      // many records changed by one request (a roll call): one database call for all of them
+      if (part.length > 1 && D.patchMany) await D.patchMany(col, part); else for (const p of part) await D.patch(col, p.id, p.base, p.set, p.unset);
+      if (whole.length) await D.put(col, whole);
+      for (const x of rows) put1(col, x.id, x.data);
+    },
     async insert(col, id, data) { const r = await D.insert(col, id, data); put1(col, id, data); return r; },
     async insertMany(col, rows) { const r = await D.insertMany(col, rows); const by = new Map(rows.map(x => [x.id, x])); for (const id of r || []) { const x = by.get(id); if (x) put1(col, id, x.data); } return r; },
     async del(col, id) { const r = await D.del(col, id); del1(col, id); return r; },

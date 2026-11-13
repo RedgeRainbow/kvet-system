@@ -57,7 +57,7 @@ async function accountDlg(kind, rerun) {
     buttons: [{ label: t('cancel'), cls: 'ghost', id: false }, { label: t('save'), id: true, fn: async d => {
       const a = $('#p1', d).value; if (a !== $('#p2', d).value) { $('#pe', d).textContent = t('pwMismatch'); return false; }
       try { const r = await api(`/portal/${kind}/password`, { kind, noRedirect: true, body: { current: $('#p0', d).value, next: a } }); setToken(kind, r.token); toast(t('pwChanged'), 'ok'); return true; }
-      catch (/** @type {any} */ x) { $('#pe', d).textContent = x.message === 'badPassword' ? t('badPassword') : x.message === 'weakPassword' ? t('pwRules') : t('server'); return false; } } }] });
+      catch (/** @type {any} */ x) { $('#pe', d).textContent = x.message === 'badPassword' ? t('badPassword') : x.message === 'weakPassword' ? t('pwRules') : x.message === 'samePassword' ? t('samePassword') : t('server'); return false; } } }] });
 }
 
 /** @param {{ kind: string, titleKey: string, icon?: any, boot: (ctx: any) => any, bodyClass?: string }} o */
@@ -66,12 +66,18 @@ export function mountPortal({ kind, titleKey, icon: _i, boot, bodyClass = '' }) 
   const app = $('#app'); document.body.classList.add(...(bodyClass ? [bodyClass] : []));
   document.title = 'KVET · ' + t(titleKey);
   const signOut = () => { setToken(kind, ''); if (kind === 'staff') setRefresh(''); run(); };
+  /* "Sign out" pressed: the server ends the session too (at most 2 s of waiting; offline, the browser copy is cleared anyway) */
+  const leave = async () => {
+    if (tokenOf(kind)) await Promise.race([api(kind === 'staff' ? '/staff/logout' : `/portal/${kind}/logout`, { kind, noRedirect: true, body: {} }).catch(() => {}), new Promise(r => setTimeout(r, 2000))]);
+    signOut();
+  };
   async function run() {
     document.title = 'KVET · ' + t(titleKey);
     if (!tokenOf(kind)) return login();
     app.innerHTML = `<div class="load"><span class="spin"></span></div>`;
     try { await boot({ app, signOut, rerender: run }); if ($('#bellBtn')) startBell(kind); } catch (/** @type {any} */ e) {
       if (e.status === 403 && e.message === 'mfaSetup') return mfaGate();
+      if (e.status === 403 && e.message === 'needPassword') return pwGate();
       if (e.status === 401 || e.status === 403) { if (e.status === 403) toast(e.message === 'accountExpired' ? t('accountExpired') : kind === 'staff' && e.message === 'forbidden' ? t('noStaffRole') : t('noAccess'), 'bad'); signOut(); }
       else { fail(e); app.innerHTML = `<div class="card"><p>${esc(errMsg(e))}</p><button class="btn" id="retry">${esc(t('retry'))}</button></div>`; $('#retry').onclick = run; }
     }
@@ -80,7 +86,20 @@ export function mountPortal({ kind, titleKey, icon: _i, boot, bodyClass = '' }) 
   function mfaGate() {
     app.innerHTML = `<div class="login-wrap"><div class="login"><div class="card"><img class="brandlogo" src="/img/logo.png" alt="KVET"><h1>${esc(t('mfaTitle'))}</h1><p>${esc(t('mfaForced'))}</p><button class="btn" id="go" style="width:100%">${esc(t('mfaTurnOn'))}</button><button class="btn ghost" id="so" style="width:100%;margin-top:8px">${esc(t('signOut'))}</button></div></div></div>`;
     $('#go').onclick = async () => { try { if (await mfaSetupDlg({ forced: true })) run(); } catch (/** @type {any} */ e) { fail(e); } };
-    $('#so').onclick = signOut;
+    $('#so').onclick = leave;
+  }
+  /* The office requires everybody to choose their own password, and this one is still the generated one. */
+  function pwGate() {
+    app.innerHTML = `<div class="login-wrap"><div class="login"><div class="card"><img class="brandlogo" src="/img/logo.png" alt="KVET"><h1>${esc(t('changePassword'))}</h1><p>${esc(t('pwForced'))}</p>
+      <form id="pf"><label>${esc(t('currentPassword'))}<input id="g0" type="password" autocomplete="current-password" required autofocus></label><label>${esc(t('newPassword'))}<input id="g1" type="password" autocomplete="new-password" minlength="8" required></label><label>${esc(t('repeatPassword'))}<input id="g2" type="password" autocomplete="new-password" required></label><p class="hint">${esc(t('pwRules'))}</p><div class="err" id="ge" role="alert"></div>
+      <button class="btn" style="width:100%">${esc(t('save'))}</button></form><button class="btn ghost" id="so" style="width:100%;margin-top:8px">${esc(t('signOut'))}</button></div></div></div>`;
+    $('#so').onclick = leave;
+    $('#pf').onsubmit = async e => {
+      e.preventDefault(); const a = $('#g1').value, btn = e.submitter; if (a !== $('#g2').value) { $('#ge').textContent = t('pwMismatch'); return; }
+      btn.disabled = true; $('#ge').textContent = '';
+      try { const r = await api(`/portal/${kind}/password`, { kind, noRedirect: true, body: { current: $('#g0').value, next: a } }); setToken(kind, r.token); toast(t('pwChanged'), 'ok'); run(); }
+      catch (/** @type {any} */ x) { $('#ge').textContent = x.message === 'badPassword' ? t('badPassword') : x.message === 'weakPassword' ? t('pwRules') : x.message === 'samePassword' ? t('samePassword') : t('server'); btn.disabled = false; }
+    };
   }
   function login() {
     document.body.className = bodyClass;
@@ -117,7 +136,7 @@ export function mountPortal({ kind, titleKey, icon: _i, boot, bodyClass = '' }) 
   }
   document.addEventListener('click', e => {
     const b = e.target?.closest('[data-lang]'); if (b) { setLang(b.dataset.lang).then(run); return; }
-    if (e.target?.closest('#signOut')) signOut();
+    if (e.target?.closest('#signOut')) leave();
     if (e.target?.closest('#account')) accountDlg(kind, run).catch(fail);
   });
   document.addEventListener('kvet:signedout', () => { toast(t('sessionEnded'), 'bad'); run(); });

@@ -12,13 +12,23 @@ async function dupFinChecks(c, fin) {
   const open = (await c.D.query('candreq', { where: [['status', 'eq', 'pending'], ['person.fin', 'eq', fin]], limit: 1 })).rows[0]; need(!open, 'dupRequest', 409);
 }
 
+/* Each ID/FIN a company sends is answered "already registered" or not - which tells it whether that person trained here.
+   300 a day per company is far above any real intake (three full imports) and ends guessing in bulk. The count lives on
+   the company record (one write per request). */
+export const FIN_PER_DAY = 300;
+async function finBudget(c, k) {
+  if (!k) return; const co = await c.D.get('companies', c.me.id), day = c.today(), used = co?.finq?.day === day ? Number(co.finq.n) || 0 : 0;
+  if (used + k > FIN_PER_DAY) { await audit(c, 'candidate.limit', `${c.me.name} · ${used} + ${k}`).catch(() => {}); throw new H(429, 'finLimit'); }
+  co.finq = { day, n: used + k }; await c.D.put('companies', [{ id: co.id, data: co }]);
+}
+
 /** @type {import('../../types/store').Routes} */
 export const candidateRoutes = {
   'POST /portal/company/candidate': { auth: 'company', async fn(c) {
     const b = await c.body(), co = c.me, strict = !co.reqOptional;               // ID/FIN + phone required, unless the centre made them optional for this company
     const p = readPerson(b, { finOptional: !strict, phoneRequired: strict });
     const st = await getSettings(c.D); need(!st.privacy?.consentRequired || bool(b.consent), 'needConsent');
-    if (p.fin) { await dupFinChecks(c, p.fin); }
+    if (p.fin) { await finBudget(c, 1); await dupFinChecks(c, p.fin); }
     const x = { id: uid('cr'), co: co.id, coName: co.name, person: p, consent: bool(b.consent), status: 'pending', at: new Date(c.now()).toISOString(), by: co.contactPerson || co.name };
     await c.D.put('candreq', [{ id: x.id, data: x }]); await audit(c, 'candidate.request', `${co.name} · ${S.fullAz(p)}`);
     await notify(c, 'staff:a:cand.approve', 'nCandNew', [co.name, S.fullAz(p)], '#/approvals', 'candreq:' + x.id);
@@ -28,6 +38,7 @@ export const candidateRoutes = {
   'POST /portal/company/candidates/import': { auth: 'company', async fn(c) {
     const b = await c.body(), co = c.me, rows = Array.isArray(b.rows) ? b.rows.slice(0, 100) : []; need(rows.length, 'badInput');
     const strict = !co.reqOptional, st = await getSettings(c.D);
+    await finBudget(c, rows.filter(r => r && String(r.fin || '').trim()).length);
     const pending = (await c.D.byField('candreq', 'co', co.id)).map(r => r.data).filter(x => x.status === 'pending' && x.person.fin);
     const openFins = new Set(pending.map(x => x.person.fin)), seen = new Set(), out1 = [], mk = [];
     for (const [i, r] of rows.entries()) {

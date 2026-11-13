@@ -198,3 +198,25 @@ test('phone size: the landing page and sign-in fit the screen (no sideways scrol
   }
   await ctx.close();
 });
+
+test('"choose your own password" step, then sign-out ends the session on the server (v3.35)', async () => {
+  const who = await api('/trainee/save', { name: 'Nigar', surname: 'Əliyeva', father: 'Rəşad qızı', fin: '7E2E009', phone: '+994504440000', consent: true });
+  await api('/settings/save', { forcePw: true });
+  const { p, errors, close } = await page();
+  try {
+    await signIn(p, '/trainee', who.creds.login, who.creds.password);
+    await p.waitForSelector('#pf');                                         // nothing of the portal, only the password step
+    assert.equal(await p.$('#nav, #view'), null);
+    await p.fill('#g0', who.creds.password); await p.fill('#g1', 'MyOwnPass77'); await p.fill('#g2', 'MyOwnPass78'); await p.click('#pf button');
+    await p.waitForFunction(() => document.querySelector('#ge')?.textContent);        // the two entries differ
+    await p.fill('#g2', 'MyOwnPass77'); await p.click('#pf button');
+    await p.waitForSelector('#signOut');                                    // the portal itself
+    const tok = await p.evaluate(() => Object.values(localStorage).find(v => /^[A-Za-z0-9+/=]{20,}\.[0-9a-f]{20,}$/.test(v)));
+    assert.ok(tok, 'the portal token is in the browser');
+    assert.equal((await fetch(BASE + '/api/portal/trainee/home', { headers: { authorization: 'Bearer ' + tok } })).status, 200);
+    await p.click('#signOut'); await p.waitForSelector('#lf');
+    assert.equal((await fetch(BASE + '/api/portal/trainee/home', { headers: { authorization: 'Bearer ' + tok } })).status, 401, 'a copy of the token is worthless after sign-out');
+    await signIn(p, '/trainee', who.creds.login, 'MyOwnPass77'); await p.waitForSelector('#signOut');     // no second "choose" step
+    assert.deepEqual(errors, []);
+  } finally { await api('/settings/save', { forcePw: false }); await close(); }
+});

@@ -13,7 +13,7 @@ export async function dueReminders(c) {
   const st = await getSettings(c.D), cfg = remindCfg(st), today = c.today();
   // only certificates still current that expire within the longest reminder period (database query)
   const horizon = new Date(Date.parse(today + 'T00:00:00Z') + Math.max(0, ...cfg.days) * 864e5).toISOString().slice(0, 10);
-  const certs = (await c.D.query('certs', { where: [['revoked', 'null', true], ['renewed', 'null', true], ['exp', 'gte', today], ['exp', 'lte', horizon]] })).rows.map(r => r.data);
+  const certs = (await c.D.query('certs', { where: [['revoked', 'null', true], ['renewed', 'null', true], ['exp', 'gte', today], ['exp', 'lte', horizon]] })).rows.map(r => r.data).filter(S.certDelivered);
   const out = [];
   for (const x of certs) {
     if (x.st === 'REVOKED' || x.st === 'RENEWED') continue;

@@ -35,7 +35,7 @@ export function diff(before, after, fields) {
   return out.slice(0, 30);
 }
 /** @param {any} [c] @param {any} [action] @param {any} [detail] @param {any} [extra] */
-export async function audit(c, action, detail = '', extra = {}) {
+function auditRow(c, action, detail = '', extra = {}) {
   const by = extra.by || (c.user ? { id: c.user.id, name: c.user.email || c.user.name || c.user.id, role: c.user.role || c.user.kind } : { name: 'system' });
   const at = new Date(c.now()).toISOString(), ip = c.req?.headers?.get?.('cf-connecting-ip') || c.req?.headers?.get?.('x-forwarded-for') || '';
   const row = { at, by, action, detail: String(detail).slice(0, 300) };
@@ -43,8 +43,13 @@ export async function audit(c, action, detail = '', extra = {}) {
   if (extra.entity) row.eid = String(extra.entity.id || '').slice(0, 100);       // indexed: a record's history without reading the trail
   if (extra.entity) row.entity = { kind: String(extra.entity.kind || '').slice(0, 20), id: String(extra.entity.id || '').slice(0, 100), label: String(extra.entity.label || '').slice(0, 120) };
   if (extra.changes?.length) row.changes = extra.changes;
-  await c.D.put('audit', [{ id: at + '-' + rnd(3), data: row }]);
+  return { id: at + '-' + rnd(3), data: row };
 }
+/** @param {any} [c] @param {any} [action] @param {any} [detail] @param {any} [extra] */
+export async function audit(c, action, detail = '', extra = {}) { await c.D.put('audit', [auditRow(c, action, detail, extra)]); }
+/* several rows in ONE database call (roll call, closing an exam, …): items = [[action, detail], …]. One row per person is
+   kept, as before; only the number of round trips changes. */
+export async function auditMany(c, items) { if (items.length) await c.D.put('audit', items.map(([action, detail], i) => { const r = auditRow(c, action, detail); r.id += '-' + i; return r; })); }   // -i: the rows share one moment, their ids must not
 
 /* -------------------------------------------------------------- settings */
 export const getSettings = async D => (await D.get('settings', 'main')) || {};
@@ -57,10 +62,14 @@ export async function assetsOut(D, st) {
   const act = sigs.find(s => s.on);
   return { logo: assetUrl(st.logo), stamp: assetUrl(st.stamp), accred: accredKeys(st).map(assetUrl), sig: act ? { id: act.id, img: assetUrl(act.key) } : null, sigs: sigs.map(s => ({ ...s, img: assetUrl(s.key) })) };
 }
+/* For the candidate and company portals: the stamp only for somebody who holds a certificate, and only the signature
+   images those certificates carry - not every signature the centre has ever used. (The images still reach the browser
+   that draws the certificate; drawing certificates on the server would be the complete answer.) */
+export const assetsFor = (a, sigIds) => { const ids = new Set(sigIds.filter(Boolean)); return { ...a, stamp: sigIds.length ? a.stamp : '', sig: null, sigs: a.sigs.filter(s => ids.has(s.id)).map(s => ({ id: s.id, img: s.img })) }; };
 export const remindCfg = st => ({ on: !!st.remind?.on, days: (st.remind?.days || [90, 30]).filter(d => Number.isInteger(d) && d > 0 && d <= 365).slice(0, 4), toCompany: st.remind?.toCompany !== false, toTrainee: st.remind?.toTrainee !== false });
 export const privacyCfg = st => ({ consentRequired: !!st.privacy?.consentRequired, finYears: Number.isInteger(st.privacy?.finYears) ? st.privacy.finYears : 0 });
 export const publicSettings = st => ({ company: st.company || {}, num: S.numCfg(st), soonDays: st.soonDays ?? S.SOON_DAYS, showFather: !!st.showFather, dash: S.dashCfg(st),
-  fbRequired: st.fbRequired !== false, certCompany: !!st.certCompany, mfa: st.mfa || 'off', remind: remindCfg(st), privacy: privacyCfg(st), approvals: S.approvalsCfg(st) });
+  fbRequired: st.fbRequired !== false, certCompany: !!st.certCompany, mfa: st.mfa || 'off', forcePw: !!st.forcePw, remind: remindCfg(st), privacy: privacyCfg(st), approvals: S.approvalsCfg(st) });
 
 /* ---------------------------------------------------------------- people */
 export const stripSecret = ({ hash, salt, sk, ...x }) => x;          // sk: search key (search.js), never sent
@@ -78,6 +87,10 @@ export const personLite = x => ({ id: x.id, att: x.att, name: x.name, surname: x
 /* --------------------------------------------------------------- sessions */
 export async function enrOf(D, sid, tid) { return (await D.get('enr', enrId(sid, tid))) || { sid, tid }; }
 export const saveEnr = (D, e) => D.put('enr', [{ id: enrId(e.sid, e.tid), data: e }]);
+/* several enrolments in ONE database call (field-level, like saveEnr: see store.js FIELD_COLS) */
+export const saveEnrs = async (D, list) => { if (list.length) await D.put('enr', list.map(e => ({ id: enrId(e.sid, e.tid), data: e }))); };
+/* the enrolments of a session's candidates, read together (one query), in the order of the list */
+export const enrsOfIds = (D, sid, tids) => Promise.all(tids.map(tid => enrOf(D, sid, tid)));
 export async function enrsOfSession(D, s) {
   const rows = new Map((await D.prefix('enr', s.id + '|')).map(r => [r.data.tid, r.data]));
   return (s.traineeIds || []).map(tid => rows.get(tid) || { sid: s.id, tid });
@@ -95,6 +108,9 @@ export function statsOf(s, enrs) {
    Lists never read whole growing collections: they read a window (recent sessions) or what a filter matches, and
    enrolments only for the sessions shown, with just the fields the lists need (no test answers). */
 export const RECENT_DAYS = 120;                       // office start-up: sessions that started in the last 120 days or later
+/* a calendar day in Baku (UTC+4, no summer time) as UTC moments: records store UTC times, people filter by Baku days */
+export const bakuDayStart = d => new Date(Date.parse(d + 'T00:00:00+04:00')).toISOString();
+export const bakuDayEnd = d => new Date(Date.parse(d + 'T00:00:00+04:00') + 864e5).toISOString();      // exclusive
 export const daysBefore = (d, n) => new Date(Date.parse(d + 'T00:00:00Z') - n * 864e5).toISOString().slice(0, 10);
 export const ENR_LITE = ['sid', 'tid', 'att', 'attBy', 'fb', 'ev', 'prac', 'final', 'absent', 'days', 'doh', 'exam'];
 const chunks = (a, n) => { const o = []; for (let i = 0; i < a.length; i += n) o.push(a.slice(i, i + n)); return o; };

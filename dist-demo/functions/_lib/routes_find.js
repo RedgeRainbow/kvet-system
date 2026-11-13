@@ -1,6 +1,6 @@
 /* Searching and paging the collections that grow every year (trainees, certificates, old sessions).
    The database filters, counts and pages (store.query); a request reads only the rows it shows. */
-import { H, S, str, num, need, getSettings, traineeOut, sessionRow, enrsFor, daysBefore, getMany, sessionsOf } from './core.js';
+import { H, S, str, num, need, getSettings, traineeOut, sessionRow, enrsFor, daysBefore, getMany, sessionsOf, bakuDayStart, bakuDayEnd } from './core.js';
 import { certSt } from './search.js';
 
 const EXPORT_MAX = 20000;
@@ -13,7 +13,7 @@ export const clean = x => { if (!x) return x; const { sk, exp, cox, ...o } = x; 
 export async function findTrainees(c, { q = '', co = '', on = '', size = 50, page = 0, from = '', to = '', type = '', sort = '', idsOnly = false } = {}) {
   const where = [], text = String(q).trim();
   // registered between two dates; type: temporary / foreign / local (registered with an Azerbaijani ID/FIN)
-  if (S.isDate(from)) where.push(['createdAt', 'gte', from]); if (S.isDate(to)) where.push(['createdAt', 'lt', to + 'T99']);
+  if (S.isDate(from)) where.push(['createdAt', 'gte', bakuDayStart(from)]); if (S.isDate(to)) where.push(['createdAt', 'lt', bakuDayEnd(to)]);
   if (type === 'temp') where.push(['temp', 'eq', 'true']); else if (type === 'foreign') where.push(['foreign', 'eq', 'true']);
   else if (type === 'local') { where.push(['foreign', 'nn', 'true']); where.push(['temp', 'nn', 'true']); }
   const order = sort === 'old' ? ['createdAt', 'asc'] : sort === 'new' ? ['createdAt', 'desc'] : sort === 'name' ? ['surname', 'asc'] : ['id', 'desc'];
@@ -50,7 +50,7 @@ async function certsQuery(c, p) {
   if (p.nos?.length) base.push(['id', 'in', p.nos]);
   // waiting for a signature (superadmin / approver): not signed, not revoked, not waiting for / returned from approval
   if (p.unsigned) base.push(['sign', 'null', true], ['esign', 'null', true], ['revoked', 'null', true], ['approval.status', 'nn', 'pending'], ['approval.status', 'nn', 'returned']);
-  if (p.issued) { const [a, z] = String(p.issued).split('..'); if (S.isDate(a)) base.push(['issuedAt', 'gte', a]); if (S.isDate(z)) base.push(['issuedAt', 'lte', z + 'T99']); base.push(['revoked', 'null', true]); }
+  if (p.issued) { const [a, z] = String(p.issued).split('..'); if (S.isDate(a)) base.push(['issuedAt', 'gte', bakuDayStart(a)]); if (S.isDate(z)) base.push(['issuedAt', 'lt', bakuDayEnd(z)]); base.push(['revoked', 'null', true]); }
   const live = [['revoked', 'null', true], ['renewed', 'null', true]];
   const ST = { REVOKED: [['revoked', 'null', false]], RENEWED: [['revoked', 'null', true], ['renewed', 'null', false]],
     EXPIRED: [...live, ['exp', 'lt', today]], SOON: [...live, ['exp', 'gte', today], ['exp', 'lte', soonDate]], ACTIVE: [...live, ['exp', 'gt', soonDate]] };

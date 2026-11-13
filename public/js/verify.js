@@ -18,7 +18,7 @@ async function runSign() {
 function askCode() {
   document.title = 'KVET · ' + t('esignCheck');
   $('#app').innerHTML = `<div class="login-wrap"><div class="login" style="max-width:420px"><div class="card" style="text-align:center"><img class="brandlogo" src="/img/logo.png" alt="" style="max-height:60px;margin-bottom:8px"><h1 style="margin:4px 0 8px">${esc(t('esignCheck'))}</h1><p class="mute sm">${esc(t('enterCodeHint'))}</p>
-    <form id="cf" class="row" style="margin-top:10px"><input id="cc" class="mono grow" placeholder="ABCD-1234" maxlength="9" autocomplete="off" autofocus style="text-transform:uppercase;text-align:center;font-size:18px"><button class="btn">${esc(t('check'))}</button></form></div><div class="row" style="justify-content:flex-end;margin-top:8px">${langSwitch()}</div></div></div>`;
+    <form id="cf" class="row" style="margin-top:10px"><input id="cc" class="mono grow" placeholder="ABCD-1234-EF56" maxlength="14" autocomplete="off" autofocus style="text-transform:uppercase;text-align:center;font-size:18px"><button class="btn">${esc(t('check'))}</button></form></div><div class="row" style="justify-content:flex-end;margin-top:8px">${langSwitch()}</div></div></div>`;
   $('#cf').onsubmit = e => { e.preventDefault(); const v = $('#cc').value.trim(); if (v) location.search = '?s=' + encodeURIComponent(v); };
 }
 async function run() {

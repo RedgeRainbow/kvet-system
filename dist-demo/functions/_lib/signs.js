@@ -47,17 +47,19 @@ export async function signerOf(c, doc = '') {
   throw new H(403, 'forbidden');
 }
 
+/* [candidate id, enrolment] of everybody in a session, sorted by id, read together (one query instead of one per person) */
+async function sessionEnrs(c, s) { const ids = [...(s.traineeIds || [])].sort(), es = await Promise.all(ids.map(tid => c.D.get('enr', `${s.id}|${tid}`))); return ids.map((tid, i) => /** @type {[string, any]} */ ([tid, es[i]])); }
 /* What exactly is fingerprinted for each kind of document (the content that matters, not timestamps of saving). */
 async function content(c, doc, ref) {
   if (doc === 'cert') { const x = await c.D.get('certs', ref.no) || (await c.D.get('archive', ref.no))?.cert; return x && { no: x.no, names: x.snap?.names, att: x.att, bid: x.bid, start: x.start, end: x.end, expiry: x.expiry }; }
   if (doc === 'att' && ref.day) {             // one day of a multi-day session: who was present / absent that day
     const s = await c.D.get('sessions', ref.sid); if (!s) return null;
-    const rows = []; for (const tid of [...(s.traineeIds || [])].sort()) { const m = (await c.D.get('enr', `${s.id}|${tid}`))?.days?.[ref.day]; rows.push([tid, m?.absent ? 'A' : m?.at ? 'P' : '']); }
+    const rows = (await sessionEnrs(c, s)).map(([tid, e]) => { const m = e?.days?.[ref.day]; return [tid, m?.absent ? 'A' : m?.at ? 'P' : '']; });
     return rows.some(r => r[1]) ? { sid: s.id, bid: s.bid, day: ref.day, tid: s.tid, rows } : null;
   }
   if (doc === 'att') {
     const s = await c.D.get('sessions', ref.sid); if (!s) return null;
-    const rows = []; for (const tid of [...(s.traineeIds || [])].sort()) { const e = await c.D.get('enr', `${s.id}|${tid}`); rows.push([tid, e?.att || null]); }
+    const rows = (await sessionEnrs(c, s)).map(([tid, e]) => [tid, e?.att || null]);
     return { sid: s.id, bid: s.bid, date: s.date, endDate: s.endDate || '', tid: s.tid, rows };
   }
   if (doc === 'prac') { const e = await c.D.get('enr', `${ref.sid}|${ref.tid}`); if (!e?.prac) return null; const { at, by, ...p } = e.prac; return { sid: ref.sid, tid: ref.tid, prac: p }; }
@@ -68,12 +70,12 @@ async function content(c, doc, ref) {
   if (doc === 'fb' && ref.tid) { const e = await c.D.get('enr', `${ref.sid}|${ref.tid}`); if (!e?.fb) return null; const { at, by, ...x } = e.fb; return { sid: ref.sid, tid: ref.tid, fb: x }; }
   if (doc === 'exam') {                        // the session's exam results: every candidate's decision / online result
     const s = await c.D.get('sessions', ref.sid); if (!s) return null;
-    const rows = []; for (const tid of [...(s.traineeIds || [])].sort()) { const e = await c.D.get('enr', `${s.id}|${tid}`); rows.push([tid, e?.exam ? { passed: e.exam.passed, score: e.exam.score ?? null } : null, e?.test?.status === 'graded' ? { pct: e.test.pct, passed: e.test.passed } : e?.test?.status || null]); }
+    const rows = (await sessionEnrs(c, s)).map(([tid, e]) => [tid, e?.exam ? { passed: e.exam.passed, score: e.exam.score ?? null } : null, e?.test?.status === 'graded' ? { pct: e.test.pct, passed: e.test.passed } : e?.test?.status || null]);
     return rows.some(r => r[1] || r[2]) ? { sid: s.id, rows } : null;
   }
   if (doc === 'ev' || doc === 'fb') {        // trainer's evaluation of the group / the trainees' training evaluation
     const s = await c.D.get('sessions', ref.sid); if (!s) return null;
-    const rows = []; for (const tid of [...(s.traineeIds || [])].sort()) { const e = await c.D.get('enr', `${s.id}|${tid}`); const v = e?.[doc]; if (v) { const { at, by, ...x } = v; rows.push([tid, x]); } }
+    const rows = []; for (const [tid, e] of await sessionEnrs(c, s)) { const v = e?.[doc]; if (v) { const { at, by, ...x } = v; rows.push([tid, x]); } }
     return rows.length ? { sid: s.id, doc, rows } : null;
   }
   if (doc === 'test') { const e = await c.D.get('enr', `${ref.sid}|${ref.tid}`); const x = e?.test; if (!x || x.status !== 'graded') return null; return { sid: ref.sid, tid: ref.tid, answers: x.answers, marks: x.marks, pct: x.pct, passed: x.passed }; }
@@ -107,14 +109,15 @@ export async function sign(c, id, doc, ref, role, { mode = 'esign' } = {}) {
   const by = await signerOf(c, doc), at = new Date(c.now()).toISOString();
   let img = '';
   if (mode === 'image') { const st = (await c.D.get('staff', c.user.id)) || /** @type {import('../../types/records').StaffRecord} */ ({}); if (c.user.kind !== 'staff' || !st.sigKey) throw new H(409, 'needSigImage'); img = st.sigKey; }
-  const raw = (await hmac(c.env.TOKEN_SECRET, `sign|${id}|${at}`)).slice(0, 8).toUpperCase(), code = raw.slice(0, 4) + '-' + raw.slice(4);
+  // 12 hex characters (48 bits) since v3.35: 8 were few enough to collide after some ten thousand signatures and to be found by trying
+  const raw = (await hmac(c.env.TOKEN_SECRET, `sign|${id}|${at}`)).slice(0, 12).toUpperCase(), code = (raw.match(/.{4}/g) || []).join('-');
   const rec = { id, doc, ref, role, by, at, hash, code, ...(img ? { mode: 'image', img } : {}) };
   await c.D.put('signs', [{ id, data: rec }]);
   await audit(c, 'sign', `${doc} ${Object.values(ref).join(' ')} · ${role} · ${by.name} · ${code}`);
   return pub(rec);
 }
 export const pub = r => (r ? { name: r.by.name, title: r.by.title, at: r.at, code: r.code, role: r.role, ...(r.img ? { mode: 'image', img: r.img } : {}) } : null);
-export async function unsign(c, ids) { const ex = []; for (const id of ids) if (await c.D.get('signs', id)) ex.push(id); if (ex.length) { await c.D.delMany('signs', ex); await audit(c, 'sign.withdrawn', ex.join(', ')); } }
+export async function unsign(c, ids) { const have = await Promise.all(ids.map(id => c.D.get('signs', id))), ex = ids.filter((_, i) => have[i]); if (ex.length) { await c.D.delMany('signs', ex); await audit(c, 'sign.withdrawn', ex.join(', ').slice(0, 300)); } }
 
 /* All signatures of one session: { att, prac: { <tid>: { examiner, candidate } } } */
 export async function sessionSigns(c, sid) {
@@ -134,8 +137,8 @@ export async function sessionSigns(c, sid) {
 
 /* Public check of a printed code. */
 export async function checkCode(c, code) {
-  const k = String(code || '').toUpperCase().replace(/[^A-F0-9]/g, ''); if (k.length !== 8) return null;
-  const r = (await c.D.byField('signs', 'code', k.slice(0, 4) + '-' + k.slice(4)))[0]?.data; if (!r) return null;
+  const k = String(code || '').toUpperCase().replace(/[^A-F0-9]/g, ''); if (k.length !== 8 && k.length !== 12) return null;      // 8: signatures made before v3.35
+  const r = (await c.D.byField('signs', 'code', (k.match(/.{4}/g) || []).join('-')))[0]?.data; if (!r) return null;
   const now = await fingerprint(c, r.doc, r.ref);
   let status = now === r.hash ? 'VALID' : 'CHANGED';
   if (r.doc === 'cert') { const x = await c.D.get('certs', r.ref.no); if (!x) status = 'WITHDRAWN'; else if (x.revoked) status = 'REVOKED'; }

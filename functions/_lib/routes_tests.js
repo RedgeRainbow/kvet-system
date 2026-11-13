@@ -11,7 +11,7 @@
    Declaration of health (e.doh): compulsory before the practical part. The trainee fills and signs it in the trainee portal,
    or staff / the trainer record that the paper form was received.
    Toolbox talk (session.tbt): filled and signed by the trainer for sessions with a practical part. */
-import { H, S, str, num, need, bool, uid, audit, enrOf, saveEnr, getSettings, edgeCached } from './core.js';
+import { H, S, str, num, need, bool, uid, audit, auditMany, enrOf, saveEnr, saveEnrs, enrsOfIds, getSettings, edgeCached } from './core.js';
 import { sign, unsign, slot } from './signs.js';
 import { loadEnrolled, loadSession, docsGate } from './ops.js';
 import { notify } from './routes_notify.js';
@@ -131,7 +131,9 @@ async function examSwitch(c, s, open) {
   if (open) { docsGate(c, s); const x = await c.D.get('tests', s.examId); need(x && !x.draft, 'testDraft', 409); need(S.usable(x), 'testNotApproved', 409); s.exam = { open: true, openedAt: at, openedBy: who }; }
   else {
     need(s.exam?.open, 'examNotStarted', 409); s.exam = { ...s.exam, open: false, closedAt: at, closedBy: who };
-    for (const tid of s.traineeIds || []) { const e = await enrOf(c.D, s.id, tid); if (e.test && !e.test.at) await finishTest(c, s, e, e.test.draft || {}, 'closed'); }
+    // every attempt still open is handed in with what was saved: read together, written together
+    const open = (await enrsOfIds(c.D, s.id, s.traineeIds || [])).filter(e => e.test && !e.test.at), done = open.map(e => markFinished(c, s, e, e.test.draft || {}, 'closed'));
+    await saveEnrs(c.D, open); if (done.some(d => d.out.status === 'graded')) await unsign(c, [slot.exam(s.id)]); await auditMany(c, done.map(d => ['test.submit', d.line]));
   }
   await c.D.put('sessions', [{ id: s.id, data: s }]); await audit(c, open ? 'exam.open' : 'exam.close', `${s.id} · ${who}`, { entity: { kind: 'session', id: s.id, label: s.date } });
   return s.exam;
@@ -213,6 +215,8 @@ const testsTrainer = {
   } },
   'POST /portal/trainer/test/grade': { auth: 'trainer', async fn(c) {
     const b = await c.body(), { s, e } = await loadEnrolled(c, b.sid, b.tid); own(c, s); need(!s.cancelled, 'sessionClosed', 409);
+    // a test the system marked by itself (multiple choice, pass rate) is not re-decided by the trainer: the office can (POST /test/grade)
+    need(!(e.test?.status === 'graded' && e.test.gradedBy === 'auto'), 'autoGraded', 409);
     const r = await grade(c, s, e, b); return { test: r.test };
   } },
   'POST /portal/trainer/exam': { auth: 'trainer', async fn(c) { const b = await c.body(), s = await loadSession(c, b.sid); own(c, s); return { exam: await examSwitch(c, s, bool(b.open)) }; } },
@@ -248,6 +252,12 @@ function cleanAnswers(x, raw = {}) {
 const deadline = x => (x.timeLimit > 0 ? new Date(x.startedAt).getTime() + (x.timeLimit * 60 + 120) * 1000 : Infinity);   // 2 minutes' grace
 /* hands the attempt in (by the trainee, at the end of the time, or when the exam is closed) and marks it when possible */
 export async function finishTest(c, s, e, answers, why = 'submit') {
+  const d = markFinished(c, s, e, answers, why);
+  await saveEnr(c.D, e); if (d.out.status === 'graded') await unsign(c, [slot.exam(s.id)]); await audit(c, 'test.submit', d.line);
+  return d.out;
+}
+/* the marking itself, nothing saved: changes e.test (and e.exam when it can be marked automatically) */
+function markFinished(c, s, e, answers, why = 'submit') {
   const x = e.test, now = c.now(), late = why === 'submit' && now > deadline(x);
   const sc = S.testScore(x.qs, answers, {});
   Object.assign(x, { answers, at: new Date(now).toISOString(), late: late || undefined, closedBy: why === 'submit' ? undefined : why, auto: { score: sc.score, max: sc.max } });
@@ -256,8 +266,7 @@ export async function finishTest(c, s, e, answers, why = 'submit') {
     Object.assign(x, { status: 'graded', score: sc.score, max: sc.max, pct: sc.pct, passed: sc.pct >= x.passRate, gradedAt: x.at, gradedBy: 'auto' });
     e.exam = { passed: x.passed, score: sc.pct, note: examLabel, at: x.at, by: 'auto', test: true };
   } else x.status = 'review';
-  await saveEnr(c.D, e); if (x.status === 'graded') await unsign(c, [slot.exam(s.id)]); await audit(c, 'test.submit', `${s.id} ${e.tid} ${x.status}${x.status === 'graded' ? ' ' + x.pct + '%' : ''}${why !== 'submit' ? ' (' + why + ')' : ''}`);
-  return { status: x.status, ...(x.status === 'graded' ? { pct: x.pct, passed: x.passed } : {}) };
+  return { out: { status: x.status, ...(x.status === 'graded' ? { pct: x.pct, passed: x.passed } : {}) }, line: `${s.id} ${e.tid} ${x.status}${x.status === 'graded' ? ' ' + x.pct + '%' : ''}${why !== 'submit' ? ' (' + why + ')' : ''}` };
 }
 const doneOut = x => ({ done: true, status: x.status, ...(x.status === 'graded' ? { pct: x.pct, passed: x.passed } : {}) });
 

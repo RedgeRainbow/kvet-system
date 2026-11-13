@@ -90,7 +90,7 @@ export default async function ({ args = /** @type {any[]} */ ([]) }) {
       onMount: d => {
         const draw = async () => {
           const k = $('#rk', d).value, v = $('#rq', d).value.trim(), f = S.foldText(v);
-          if (k === 'staff') { staff ||= (await api('/dm/people', { kind: 'staff' })).list; found = (staff || []).filter(x => S.foldText(`${x.name} ${x.email}`).includes(f)).map(x => ({ id: 'new:' + x.id, name: x.name || x.email, sub: t('role_' + x.role) })); }
+          if (k === 'staff') { staff ||= (await api('/dm/people', { kind: 'staff' })).list; found = (staff || []).filter(x => S.foldText(`${x.name} ${x.email || ''}`).includes(f)).map(x => ({ id: 'new:' + x.id, name: x.name || x.email, sub: t('role_' + x.role) })); }
           else if (k === 'trainer') found = A.trainers.filter(x => x.on !== false && S.foldText(S.fullAz(x, false)).includes(f)).map(x => ({ id: 'trainer:' + x.id, name: S.fullAz(x, false) }));
           else if (k === 'company') found = A.companies.filter(x => S.foldText(x.name).includes(f)).map(x => ({ id: 'company:' + x.id, name: x.name }));
           else found = v.length < 2 ? [] : (await findTrainees({ q: v, size: 20 })).list.map(x => ({ id: 'trainee:' + x.id, name: S.fullAz(x), sub: x.att }));

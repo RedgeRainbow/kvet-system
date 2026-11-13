@@ -80,12 +80,20 @@ export async function nextAtts(c, k = 1) {
 /* temporary account -> registered candidate (new learner number); returns the new record */
 export async function completeTemp(c, t, { fin, phone, docType }) {
   const D = c.D, [att] = await nextAtts(c);
-  if (t.fin && t.fin === fin) await D.put('fins', [{ id: fin, data: { id: att } }]);          // the office already gave the FIN
-  else try { await D.insert('fins', fin, { id: att }); } catch (/** @type {any} */ e) { if (e instanceof H && e.message === 'dup') throw new H(409, 'finExists'); throw e; }
-  const login = await claimLogin(D, 'trainee', att, att);
-  const { temp, tempLogin, ...rest } = t;
-  const x = { ...rest, id: att, att, fin, phone, ...(t.foreign && docType ? { docType } : {}), login, registeredAt: new Date(c.now()).toISOString(), wasTemp: t.id };
-  await D.put('trainees', [{ id: att, data: x }]);
+  const had = t.fin && t.fin === fin, stamp = new Date(c.now()).toISOString();
+  if (had) await D.put('fins', [{ id: fin, data: { id: att, at: stamp } }]);          // the office already gave the FIN
+  else try { await D.insert('fins', fin, { id: att, at: stamp }); } catch (/** @type {any} */ e) { if (e instanceof H && e.message === 'dup') throw new H(409, 'finExists'); throw e; }
+  /** @type {any} */ let x;
+  try {
+    const login = await claimLogin(D, 'trainee', att, att);
+    const { temp, tempLogin, ...rest } = t;
+    x = { ...rest, id: att, att, fin, phone, ...(t.foreign && docType ? { docType } : {}), login, registeredAt: stamp, wasTemp: t.id };
+    await D.put('trainees', [{ id: att, data: x }]);
+  } catch (e) {
+    // the new record was not written: the ID/FIN goes back to where it was (the temporary account, or nobody)
+    try { if (had) await D.put('fins', [{ id: fin, data: { id: t.id, at: stamp } }]); else await D.del('fins', fin); } catch {}
+    throw e;
+  }
   await moveTrainee(c, t.id, att);
   await D.del('trainees', t.id); await D.del('logins', loginKey('trainee', t.login));
   await audit(c, 'trainee.register', `${t.id} → ${att} ${S.fullAz(x)} (FIN and phone given at the first sign-in)`, { entity: { kind: 'trainee', id: att, label: `${att} ${S.fullAz(x)}` } });

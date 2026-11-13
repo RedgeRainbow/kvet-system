@@ -40,6 +40,10 @@ export interface Store {
   lockState(k: string): Promise<number>;
   lockFail(k: string, max: number, secs: number): Promise<number>;
   lockOk(k: string): Promise<any>;
+  lockSweep?(before: string): Promise<number>;
+  /** field-level write of one record (store.js FIELD_COLS, schema.sql patch_record) */
+  patch?(col: string, id: string, base: any, set: { p: string[]; v: any }[], unset: string[][]): Promise<any>;
+  patchMany?(col: string, rows: { id: string; base: any; set: { p: string[]; v: any }[]; unset: string[][] }[]): Promise<any>;
   restore(cols: string[], data: any, ctrs?: any[]): Promise<any>;
   /** raw PostgREST call (production store only) */
   call?: (path: string, o?: any) => Promise<any>;

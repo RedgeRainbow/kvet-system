@@ -1,6 +1,6 @@
 /* Public routes (no sign-in), staff sign-in and portal sign-in. */
 import { H, S, str, need, audit, getSettings, assetsOut } from './core.js';
-import { pbk, hmac, mkTok, loginKey, attempt, attemptOk, attemptBad, attemptKeys, same } from './auth.js';
+import { pbk, hmac, mkTok, loginKey, attempt, attemptOk, attemptBad, attemptKeys, same, rounds, PBK_MIN } from './auth.js';
 import { checkCode } from './signs.js';
 
 const ACCOUNT_COL = { trainer: 'trainers', trainee: 'trainees', company: 'companies' };
@@ -46,7 +46,11 @@ export const publicRoutes = {
 
   /* checks a printed electronic-signature code */
   'GET /verify-sign': { auth: 'none', async fn(c) {
-    const r = await checkCode(c, c.url.searchParams.get('c')); need(r, 'noRec', 404);
+    // codes that do not exist are counted per address: 20 in 15 minutes, then that address waits (nobody mistypes that often)
+    const ip = (c.req.headers.get('cf-connecting-ip') || '').trim(), k = ip ? 'vs:' + ip : '';
+    if (k) { const u = await c.D.lockState(k); if (u) throw new H(429, 'locked', { until: new Date(u).toISOString() }); }
+    const r = await checkCode(c, c.url.searchParams.get('c'));
+    if (!r) { if (k) await c.D.lockFail(k, 20, 15 * 60).catch(() => {}); throw new H(404, 'noRec'); }
     const st = await getSettings(c.D); return { ...r, info: { name: st.company?.name || 'KVET', logo: (await assetsOut(c.D, st)).logo } };
   } },
   'GET /asset/:key': { auth: 'none', raw: true, async fn(c) {
@@ -58,7 +62,7 @@ export const publicRoutes = {
 
   /* ---- staff sign-in (Supabase Auth behind the API). Every attempt lands in the audit trail. ---- */
   'POST /staff/login': { auth: 'none', async fn(c) {
-    const b = await c.body(), email = str(b.email, 120).toLowerCase(), keys = attemptKeys(c, 'staff:' + email), who = { name: email || '?', role: 'staff' };
+    const b = await c.body(), email = str(b.email, 120).toLowerCase(), keys = attemptKeys(c, 'staff:' + email, { wide: email !== EMERGENCY_LOGIN }), who = { name: email || '?', role: 'staff' };
     try { await attempt(c, keys); } catch (/** @type {any} */ e) { await audit(c, 'login.locked', email, { by: who }).catch(() => {}); throw e; }
     if (email === EMERGENCY_LOGIN) return emergencyLogin(c, String(b.password || ''), keys);
     let t;
@@ -69,6 +73,9 @@ export const publicRoutes = {
       // second step: the code from the authenticator app (POST /staff/mfa/verify)
       const f = (await c.A.factors(t.access)).find(x => x.status === 'verified');
       if (f) { await audit(c, 'login.mfa', email, { by: { id: u.id, name: email, role: u.role } }).catch(() => {}); return { mfa: true, ticket: t.access, factorId: f.id, email: u.email }; }
+      // marked "two-factor on" but the sign-in service holds no authenticator any more (removed there): without this the person
+      // got a token every route refused. The mark is cleared; where two-factor is compulsory the set-up screen follows.
+      const rec = await c.D.get('staff', u.id); if (rec?.mfa) { delete rec.mfa; await c.D.put('staff', [{ id: u.id, data: rec }]); await audit(c, 'mfa.missing', email, { by: { id: u.id, name: email, role: u.role } }).catch(() => {}); }
     }
     await audit(c, 'login.ok', email, { by: { id: u.id, name: email, role: u.role } }).catch(() => {});
     return { access: t.access, refresh: t.refresh, role: u.role, email: u.email };
@@ -99,10 +106,15 @@ export const publicRoutes = {
     const col = ACCOUNT_COL[role], reg = await c.D.get('logins', key);
     const acc = (reg?.id && await c.D.get(col, reg.id)) || null;
     const why = !acc ? 'unknown login' : !acc.hash || !acc.salt ? 'no password set (reset it in Admin)' : acc.on === false ? 'account disabled' : '';
-    const ok = !why && same(await pbk(String(b.password), acc.salt), acc.hash);
+    const ok = !why && same(await pbk(String(b.password), acc.salt, acc.it), acc.hash);
     if (!ok) { await attemptBad(c, keys); await audit(c, 'login.fail', `${role} ${login} · ${why || 'wrong password'}`, { by: who }).catch(() => {}); throw new H(401, 'badLogin'); }
     await attemptOk(c, keys);
     await audit(c, 'login.ok', `${role} ${login}`, { by: { id: acc.id, name: login, role } }).catch(() => {});
-    return { token: await mkTok(c.env, { r: role, id: acc.id, pv: acc.pv || 0 }), role };
+    // stronger hashing configured since this password was stored: raised now, while the password is at hand
+    const R = rounds(c.env);
+    if (R > (Number(acc.it) || PBK_MIN)) try { acc.it = R; acc.hash = await pbk(String(b.password), acc.salt, R); await c.D.put(col, [{ id: acc.id, data: acc }]); } catch {}
+    // settings.forcePw: a password the system generated (never changed by the person) only opens the "choose your own" step
+    const mp = !!(await getSettings(c.D)).forcePw && !acc.pwAt;
+    return { token: await mkTok(c.env, { r: role, id: acc.id, pv: acc.pv || 0, ...(mp ? { mp: 1 } : {}) }), role, ...(mp ? { mustPw: true } : {}) };
   } },
 };

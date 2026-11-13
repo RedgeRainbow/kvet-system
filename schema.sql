@@ -312,6 +312,9 @@ declare r login_locks; begin
  return case when r.until > now() then r.until else null end; end $$;
 create or replace function login_state(k text) returns timestamptz language sql as $$ select until from login_locks where key=k and until > now() $$;
 create or replace function login_ok(k text) returns void language sql as $$ delete from login_locks where key=k $$;
+-- daily clean-up: counters nobody touched since `before` and that lock nothing any more
+create or replace function login_sweep(before timestamptz) returns int language plpgsql as $$
+declare n int; begin delete from login_locks where updated_at < before and (until is null or until < now()); get diagnostics n = row_count; return n; end $$;
 
 -- ---------------------------------------------------------------- restore from a backup in ONE transaction
 -- rows are first copied into records_restore, then swapped in here. The audit trail is never part of a restore.
@@ -328,6 +331,57 @@ declare c int; begin
   on conflict(name) do update set val=greatest(counters.val, excluded.val);
  end if;
  delete from records_restore; return c; end $$;
+
+-- ---------------------------------------------------------------- the audit trail is append-only, also for the service key
+-- The app only ever adds rows. These rules make that a property of the database: a row of the audit trail cannot be
+-- changed or deleted, and the table cannot be emptied, by anybody who is not the database owner working in the SQL Editor
+-- (who would first have to drop the trigger - which is visible).
+create or replace function audit_is_final() returns trigger language plpgsql as $$
+begin raise exception 'the audit trail cannot be changed or deleted' using errcode = '42501'; end $$;
+drop trigger if exists audit_no_change on rec_audit;
+create trigger audit_no_change before update or delete on rec_audit for each row execute function audit_is_final();
+drop trigger if exists audit_no_truncate on rec_audit;
+create trigger audit_no_truncate before truncate on rec_audit for each statement execute function audit_is_final();
+
+-- updated_at = the moment of the last change (it used to keep the moment the row was created)
+create or replace function touch_updated_at() returns trigger language plpgsql as $$
+begin if new.data is distinct from old.data then new.updated_at := now(); end if; return new; end $$;
+drop trigger if exists records_touch on records;
+create trigger records_touch before update on records for each row execute function touch_updated_at();
+
+-- ---------------------------------------------------------------- field-level write of ONE record, in one statement
+-- The app writes only the fields a request changed (store.js: FIELD_COLS), so two people changing different parts of the
+-- same record at the same moment (a trainee's answers, the trainer's evaluation) both keep their change.
+--   p_set   [{"p": ["ev"], "v": {...}}, {"p": ["test","draft"], "v": {...}}]     p_unset  [["absent"], ["test","warns"]]
+--   p_base  the whole record: written as it is when the row does not exist (yet / any more)
+create or replace function patch_record(p_col text, p_id text, p_base jsonb, p_set jsonb default '[]'::jsonb, p_unset jsonb default '[]'::jsonb)
+returns void language plpgsql as $$
+declare d jsonb; x jsonb; begin
+  insert into records(col, id, data) values (p_col, p_id, p_base) on conflict (col, id) do nothing;
+  if found then return; end if;
+  select data into d from records where col = p_col and id = p_id for update;      -- the row is locked until this call ends
+  if not found then                                                                -- deleted in between
+    insert into records(col, id, data) values (p_col, p_id, p_base) on conflict (col, id) do update set data = excluded.data, updated_at = now(); return;
+  end if;
+  for x in select value from jsonb_array_elements(coalesce(p_set, '[]'::jsonb)) loop
+    if x->'v' is null or jsonb_typeof(x->'p') <> 'array' then raise exception 'patch_record: bad set entry'; end if;
+    d := jsonb_set(d, array(select jsonb_array_elements_text(x->'p')), x->'v', true);
+  end loop;
+  for x in select value from jsonb_array_elements(coalesce(p_unset, '[]'::jsonb)) loop
+    d := d #- array(select jsonb_array_elements_text(x));
+  end loop;
+  update records set data = d, updated_at = now() where col = p_col and id = p_id;
+end $$;
+
+-- the same for many records of one collection in ONE call (a roll call, closing an exam): p_rows = [{id, base, set, unset}]
+-- rows are taken in the order of their ids, so two such calls can never wait for each other in a circle
+create or replace function patch_records(p_col text, p_rows jsonb) returns int language plpgsql as $$
+declare r jsonb; n int := 0; begin
+  for r in select value from jsonb_array_elements(p_rows) order by value->>'id' loop
+    perform patch_record(p_col, r->>'id', r->'base', coalesce(r->'set', '[]'::jsonb), coalesce(r->'unset', '[]'::jsonb)); n := n + 1;
+  end loop;
+  return n;
+end $$;
 
 -- ---------------------------------------------------------------- many records by a list of values in ONE call
 -- (ids of a session's people, enrolments of 300 sessions …): a URL can only carry ~60 values
@@ -347,8 +401,8 @@ create or replace function table_sizes() returns table(col text, rows bigint, by
   select substr(c.relname, 5), c.reltuples::bigint, pg_total_relation_size(c.oid)
   from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'records'::regclass order by 3 desc $$;
 
-revoke execute on function next_seq(text), bump_seq(text, bigint), next_seq_n(text,int), login_fail(text,int,int), login_state(text), login_ok(text),
-  apply_restore(text[],jsonb), records_in(text, text, text[], text[]), db_size(), table_sizes() from public, anon, authenticated;
+revoke execute on function next_seq(text), bump_seq(text, bigint), next_seq_n(text,int), login_fail(text,int,int), login_state(text), login_ok(text), login_sweep(timestamptz),
+  apply_restore(text[],jsonb), records_in(text, text, text[], text[]), patch_record(text, text, jsonb, jsonb, jsonb), patch_records(text, jsonb), db_size(), table_sizes() from public, anon, authenticated;
 
 -- ---------------------------------------------------------------- indexes (each on its own collection table)
 -- Every list the app shows is filtered, counted and paged by the database; these keep it fast with years of data.

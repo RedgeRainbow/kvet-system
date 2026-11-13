@@ -18,12 +18,14 @@ export default async function ({ rerender }) {
     $('#some')?.addEventListener('click', async () => { if (await confirmDlg(t(tab === 'PASS' ? 'releaseAllConfirm' : 'failAllConfirm', sel.length))) bulk(sel); });
     $('#pa')?.addEventListener('change', e => { rows.forEach(r => (e.target.checked ? picked.add(key(r)) : picked.delete(key(r)))); draw(); });
   }
-  /* releases in blocks of 50 (one request each); then the new certificates can be printed or downloaded together */
+  /* releases in blocks of 2 (one request each: a release with its signature is about 20 database calls, and the hosting plan limits
+     them per request); then the new certificates can be printed or downloaded together */
   async function bulk(list) {
     let ok = 0, bad = 0; const certs = [];
-    for (let i = 0; i < list.length; i += 50) {
-      toast(t('releasing', Math.min(i + 50, list.length), list.length));
-      try { const r = (await api('/issue/bulk', { kind: 'staff', body: { items: list.slice(i, i + 50).map(x => ({ sid: x.sid, tid: x.tid })) } })).results; for (const x of r) { if (x.ok) { ok++; if (x.cert) certs.push(x.cert); } else bad++; } } catch (/** @type {any} */ e) { fail(e); bad += Math.min(50, list.length - i); }
+    const PART = 2;
+    for (let i = 0; i < list.length; i += PART) {
+      toast(t('releasing', Math.min(i + PART, list.length), list.length));
+      try { const r = (await api('/issue/bulk', { kind: 'staff', body: { items: list.slice(i, i + PART).map(x => ({ sid: x.sid, tid: x.tid })) } })).results; for (const x of r) { if (x.ok) { ok++; if (x.cert) certs.push(x.cert); } else bad++; } } catch (/** @type {any} */ e) { fail(e); bad += Math.min(PART, list.length - i); }
     }
     toast(t('releasedN', ok, bad), bad ? 'bad' : 'ok'); picked.clear(); await load(); data = (await api('/issue/queue', { kind: 'staff' })).list; draw(); window.__badges?.();
     if (certs.length) openModal({ title: t('certsIssuedN', certs.length), html: `<p>${certs.map(c => `<span class="mono">${esc(c.no)}</span> ${esc(c.snap?.names?.en || '')}`).join('<br>')}</p><div id="zp" class="mute sm"></div>`,

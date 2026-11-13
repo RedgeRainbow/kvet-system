@@ -140,7 +140,7 @@ export async function sessionForm(s, rerender) {
     f.bid.onchange = () => { const b = blank(f.bid.value); if (b?.defaultSheetId && !f.sheetId.value) f.sheetId.value = b.defaultSheetId; tests(); days(); };
   }, buttons: [{ label: t('cancel'), cls: 'ghost', id: 'x' }, { label: t('save'), id: 'ok', fn: async d => {
     const f = $('#sf', d); if (!f.reportValidity()) return false;
-    try { const r = await api('/session/save', { kind: 'staff', body: { ...Object.fromEntries(new FormData(f)), id: s?.id, materials: [...mats], traineeIds: [...sel] } }); await load(); savedToast(); if (r.warnings?.length) clashToast(r.warnings); if (r.certsBehind && can('cert.update')) setTimeout(() => certLinesDlg(r.session.id, r.certsBehind, rerender), 50); if (!s) { A.slipsFor = r.session.id; location.hash = '#/sessions/' + r.session.id; } else rerender(); return true; }
+    try { const r = await api('/session/save', { kind: 'staff', body: { ...Object.fromEntries(new FormData(f)), id: s?.id, materials: [...mats], traineeIds: [...sel], ...(s?.id ? { baseIds: s.traineeIds || [] } : {}) } }); await load(); savedToast(); if (r.warnings?.length) clashToast(r.warnings); if (r.certsBehind && can('cert.update')) setTimeout(() => certLinesDlg(r.session.id, r.certsBehind, rerender), 50); if (!s) { A.slipsFor = r.session.id; location.hash = '#/sessions/' + r.session.id; } else rerender(); return true; }
     catch (/** @type {any} */ e) { $('#se', d).textContent = e.message === 'hasData' ? t('hasDataTrainee') : e.message === 'poolTooSmall' ? t('poolTooSmall', e.data?.k, e.data?.n) : t(e.message) === e.message ? t('server') : t(e.message); return false; } } }] });
 }
 

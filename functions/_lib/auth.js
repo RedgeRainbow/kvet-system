@@ -6,17 +6,24 @@ export const hex = b => [...new Uint8Array(b)].map(x => x.toString(16).padStart(
 const unhex = h => new Uint8Array(h.match(/../g).map(x => parseInt(x, 16)));
 export const rnd = n => hex(crypto.getRandomValues(new Uint8Array(n)));
 export const sha = async s => hex(await crypto.subtle.digest('SHA-256', enc.encode(s)));
-export const pbk = async (p, salt) => hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: unhex(salt), iterations: 100000, hash: 'SHA-256' }, await crypto.subtle.importKey('raw', enc.encode(p), 'PBKDF2', false, ['deriveBits']), 256));
+/** @param {string} p @param {string} salt @param {number} [it] rounds this hash was made with (accounts: `it`; none = 100,000) */
+export const pbk = async (p, salt, it) => hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', salt: unhex(salt), iterations: Number(it) >= PBK_MIN ? Number(it) : PBK_MIN, hash: 'SHA-256' }, await crypto.subtle.importKey('raw', enc.encode(p), 'PBKDF2', false, ['deriveBits']), 256));
+/* Rounds for passwords people choose or sign in with from now on. The variable PBKDF2_ROUNDS raises it (OWASP: 600,000);
+   it needs the CPU time of the Workers Paid plan, so the default stays 100,000. Generated passwords are hashed at the
+   default (a bulk import hashes hundreds at once) and raised at the person's first sign-in. */
+export const PBK_MIN = 100000;
+export const rounds = env => { const n = Math.floor(Number(env?.PBKDF2_ROUNDS)); return n >= PBK_MIN && n <= 1000000 ? n : PBK_MIN; };
 export const hmac = async (secret, msg) => { const k = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']); return hex(await crypto.subtle.sign('HMAC', k, enc.encode(msg))); };
 
 /* Readable one-time passwords: no 0/O, 1/l/I. */
 const ALPHA = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456789';
-/* Candidates' passwords are easy to remember and to type from a printed slip: three letters (upper, lower, upper; no
-   look-alikes such as I / l / O) followed by 12345, e.g. "CdC12345". Staff decided this for candidates; trainers and companies
-   keep random passwords. Sign-in attempts stay limited (lockout), which is what protects these accounts. */
+/* Candidates' passwords are easy to type from a printed slip: three letters (upper, lower, upper; no look-alikes such as
+   I / l / O) followed by five digits, e.g. "CdC48302". Until v3.34 the digits were always 12345, which left 12,167 possible
+   passwords for sign-in names that run in sequence (learner numbers): few enough to find one by trying a handful of
+   passwords on many accounts, under any lockout. With random digits there are 1.2 billion. */
 export function candidatePassword() {
-  const U = 'ABCDEFGHJKMNPQRSTUVWXYZ', L = 'abcdefghjkmnpqrstuvwxyz', r = crypto.getRandomValues(new Uint32Array(3));
-  return U[r[0] % U.length] + L[r[1] % L.length] + U[r[2] % U.length] + '12345';
+  const U = 'ABCDEFGHJKMNPQRSTUVWXYZ', L = 'abcdefghjkmnpqrstuvwxyz', r = crypto.getRandomValues(new Uint32Array(4));
+  return U[r[0] % U.length] + L[r[1] % L.length] + U[r[2] % U.length] + String(r[3] % 100000).padStart(5, '0');
 }
 export function genPassword(n = 8) {
   const out = []; const buf = crypto.getRandomValues(new Uint8Array(n * 4));
@@ -56,9 +63,20 @@ export async function claimLogin(D, role, wanted, accountId) {
    - Per IP address: only FAILED attempts count (100 in 15 minutes, then that address is locked for 15 minutes), and a
      successful sign-in does not clear it. A classroom shares one address: thirty people signing in (and the odd typo) never
      lock it, while one address guessing across many accounts is stopped - and cannot reset the counter with an account of its own. */
-export const LOCK = { account: 8, ip: 100, secs: 15 * 60 };
+/* - Who gets locked (v3.35): the 8-attempt lock is per account AND address. Before, it was per account alone, so anybody
+     who knew a sign-in name (learner numbers run in sequence; the office e-mail is public) could keep that account locked
+     for good with 9 requests every 15 minutes, from one computer - including the break-glass account. Now those guesses
+     lock only the guesser's own address for that account. A wider limit still protects the account against guessing from
+     many addresses at once: 40 FAILED attempts in 15 minutes, whatever the address, lock it for everyone for 15 minutes
+     (not used for the break-glass account, whose secret is at least 16 random characters and must stay reachable). */
+export const LOCK = { account: 8, ip: 100, wide: 40, secs: 15 * 60 };
 const ipOf = c => (c.req?.headers?.get?.('cf-connecting-ip') || c.req?.headers?.get?.('x-forwarded-for') || '').split(',')[0].trim();
-export function attemptKeys(c, key) { const ip = ipOf(c); return ip ? [[key, LOCK.account], ['ip:' + ip, LOCK.ip]] : [[key, LOCK.account]]; }
+export const wideKey = key => 'all:' + key;
+/** @param {any} c @param {string} key @param {{ wide?: boolean }} [o] */
+export function attemptKeys(c, key, { wide = true } = {}) {
+  const ip = ipOf(c); if (!ip) return [[key, LOCK.account]];                 // no address known (tools, tests): per account, as before
+  return [[key + '@' + ip, LOCK.account], ['ip:' + ip, LOCK.ip], ...(wide ? [[wideKey(key), LOCK.wide]] : [])];
+}
 export async function attempt(c, keys) {
   for (const [k] of keys) { const u = await c.D.lockState(k); if (u) throw new H(429, 'locked', { until: new Date(u).toISOString() }); }
   const [k, max] = keys[0]; const u = await c.D.lockFail(k, max + 1, LOCK.secs); if (u) throw new H(429, 'locked', { until: new Date(u).toISOString() });
@@ -141,10 +159,12 @@ export function supabaseAuth(env) {
     /* { id, email, aal } from a valid access token: checked locally (JWKS / JWT secret) when possible, else by Supabase */
     async user(token) {
       const claims = await verifyJwt(token, { base, secret: env.SUPABASE_JWT_SECRET });
-      if (claims) return { id: claims.sub, email: claims.email, aal: claims.aal || 'aal1' };
+      if (claims) return { id: claims.sub, email: claims.email, aal: claims.aal || 'aal1', sid: claims.session_id || '', exp: claims.exp };
       const r = await fetch(base + '/auth/v1/user', { headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY, authorization: 'Bearer ' + token } });
-      if (!r.ok) throw new H(401, 'auth'); const u = await r.json(); return { id: u.id, email: u.email, aal: jwtClaims(token)?.aal || 'aal1' };
+      if (!r.ok) throw new H(401, 'auth'); const u = await r.json(), cl = jwtClaims(token); return { id: u.id, email: u.email, aal: cl?.aal || 'aal1', sid: cl?.session_id || '', exp: cl?.exp };
     },
+    /* sign-out: this session's refresh token stops working (the access token is refused by the app itself: staff.out) */
+    async logout(token) { await fetch(base + '/auth/v1/logout?scope=local', { method: 'POST', headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY, authorization: 'Bearer ' + token } }).catch(() => {}); },
     /* ---- two-factor (TOTP) through Supabase Auth MFA ---- */
     async factors(token) {
       const r = await fetch(base + '/auth/v1/user', { headers: { apikey: env.SUPABASE_PUBLISHABLE_KEY, authorization: 'Bearer ' + token } });
@@ -202,13 +222,14 @@ export function supabaseAuth(env) {
 /* In-process auth provider for tests and the local dev server. */
 export function memoryAuth() {
   const users = new Map(), toks = new Map(); let n = 0;
-  const issue = (u, aal = 'aal1') => { const access = 'a' + (++n) + rnd(6), refresh = 'r' + n + rnd(6); toks.set(access, { id: u.id, aal }); toks.set(refresh, { id: u.id, aal }); return { access, refresh, user: { id: u.id, email: u.email } }; };
+  const issue = (u, aal = 'aal1', sid = 's' + (n + 1)) => { const access = 'a' + (++n) + rnd(6), refresh = 'r' + n + rnd(6); toks.set(access, { id: u.id, aal, sid }); toks.set(refresh, { id: u.id, aal, sid }); return { access, refresh, user: { id: u.id, email: u.email } }; };
   const who = t => { const x = toks.get(t); const u = x && users.get(x.id); if (!u) throw new H(401, 'auth'); return { u, aal: x.aal }; };
   return {
     addUser(email, password) { const u = { id: 'u' + (++n) + rnd(3), email: email.toLowerCase(), password, factors: [] }; users.set(u.id, u); return u; },
     async login(email, password) { const u = [...users.values()].find(x => x.email === String(email).toLowerCase()); if (!u || u.password !== password) throw new H(401, 'badLogin'); return issue(u); },
-    async refresh(r) { const { u, aal } = who(r); return issue(u, aal); },
-    async user(t) { const { u, aal } = who(t); return { id: u.id, email: u.email, aal }; },
+    async refresh(r) { const { u, aal } = who(r); return issue(u, aal, toks.get(r).sid); },
+    async user(t) { const { u, aal } = who(t); return { id: u.id, email: u.email, aal, sid: toks.get(t).sid, exp: Math.floor(Date.now() / 1000) + 3600 }; },
+    async logout(t) { const sid = toks.get(t)?.sid; for (const [k, v] of toks) if (k.startsWith('r') && v.sid === sid) toks.delete(k); },   // like Supabase: the refresh token dies, the access token lives on until it expires
     async createUser(email, password) { const u = [...users.values()].find(x => x.email === email); if (u) { u.password = password; return { id: u.id, reused: true }; } return { id: this.addUser(email, password).id }; },
     async setPassword(id, p) { const u = users.get(id); if (u) u.password = p; },
     async deleteUser(id) { users.delete(id); },

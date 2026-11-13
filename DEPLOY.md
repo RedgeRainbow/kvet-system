@@ -82,7 +82,7 @@ R2 is connected through the `BUCKET` binding, so no R2 keys are needed.
     # set APP_URL in workers/cron/wrangler.toml to your live address
     npx wrangler secret put CRON_SECRET          # same value as the Pages secret
     npx wrangler deploy
-It runs every day at 04:17 Baku time. Test it: open `https://kvet-cron.<account>.workers.dev/?key=<CRON_SECRET>`.
+It runs every day at 04:17 Baku time. Test it: `curl -H "x-cron-key: <CRON_SECRET>" https://kvet-cron.<account>.workers.dev/` (opening `…/?key=<CRON_SECRET>` in a browser still works, but leaves the secret in the browser history).
 Without the scheduler a backup is still made when an admin opens the panel (at most once a day), but reminders and retention do not run.
 
 ## 4. First run

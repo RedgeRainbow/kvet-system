@@ -48,7 +48,11 @@ async function readJson(request) {
   if (declared > MAX_JSON) throw new H(413, 'tooLarge');
   const text = await request.text();
   if (text.length > MAX_JSON) throw new H(413, 'tooLarge');
-  try { return text ? JSON.parse(text) : {}; } catch { return {}; }
+  if (!text.trim()) return {};
+  // a body that is not a JSON object is a bad request (it used to read as {} - or, for "null" / a list, crash the route)
+  let v; try { v = JSON.parse(text); } catch { throw new H(400, 'badInput'); }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) throw new H(400, 'badInput');
+  return v;
 }
 /* security headers on every API answer (the site's _headers file does not reach Functions) */
 const SEC = { 'x-content-type-options': 'nosniff', 'x-frame-options': 'DENY', 'referrer-policy': 'same-origin',
@@ -77,7 +81,7 @@ function secure(res) {
       const origin = request.headers.get('origin');
       if (origin && request.method !== 'GET' && origin !== url.origin) throw new H(403, 'badOrigin');
       /** @type {any} */ let route = null; let params = {};
-      for (const r of ROUTES) { if (r.m !== request.method) continue; const m = r.re.exec(path); if (m) { route = r; r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1]))); break; } }
+      for (const r of ROUTES) { if (r.m !== request.method) continue; const m = r.re.exec(path); if (m) { route = r; try { r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1]))); } catch { throw new H(404, 'noRec'); } break; } }   // a broken %-code in the address: not found
       if (!route) throw new H(404, 'noRec');
       const now = deps.now || Date.now;
       const live = tracked(indexed(cached(deps.store(env))));
@@ -100,9 +104,11 @@ function secure(res) {
           s = { ...(s || {}), email: u.email, role: 'superadmin' }; await c.D.put('staff', [{ id: u.id, data: s }]);
         }
         if (!s) throw new H(403, 'forbidden');
+        // signed out (POST /staff/logout): that session's access token is refused although it has not expired yet
+        if (u.sid && s.out?.[u.sid]) throw new H(401, 'auth');
         // time-limited accounts (e.g. an external auditor): refused after the last day
         if (s.expires && S.bakuToday(now()) > s.expires) throw new H(403, 'accountExpired');
-        const user = { id: u.id, email: u.email || s.email, role: S.legacyRole(s.role), kind: 'staff', mfa: !!s.mfa, aal: u.aal };
+        const user = { id: u.id, email: u.email || s.email, role: S.legacyRole(s.role), kind: 'staff', mfa: !!s.mfa, aal: u.aal, sid: u.sid || '', exp: u.exp || 0 };
         if (opts.mfa !== 'skip') {
           if (s.mfa && u.aal !== 'aal2') throw new H(401, 'mfaRequired');
           const pol = (await settingsP)?.mfa || 'off';
@@ -128,6 +134,8 @@ function secure(res) {
         if (t.r !== auth) throw new H(401, 'auth');
         const [acc] = await Promise.all([c.D.get(PORTAL_COL[auth], t.id), c.D.get('settings', 'main').catch(() => null)]);   // settings: almost every route needs them; read alongside
         if (!acc || acc.on === false || (acc.pv || 0) !== (t.pv || 0)) throw new H(401, 'auth');
+        // signed in with a generated password while the office requires people to choose their own: nothing but that step
+        if (t.mp && path !== `/portal/${auth}/password` && path !== `/portal/${auth}/logout`) throw new H(403, 'needPassword');
         c.me = acc; c.user = { kind: auth, id: acc.id, name: S.fullEn(acc) || acc.name }; who = auth + ':' + acc.id;
         if (auth === 'company') c.user.name = acc.name;
         // a trainee registered by the office without ID/FIN or phone gives them at the first sign-in, before anything else

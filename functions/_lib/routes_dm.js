@@ -54,7 +54,7 @@ export const dmRoutes = {
   /* colleagues I can write to */
   'GET /dm/people': { auth: 'staff', act: 'view', async fn(c) {
     const who = me(c);
-    return { list: (await c.D.all('staff')).filter(r => r.id !== who && r.id !== 'emergency').map(r => ({ id: r.id, name: nameOf(r.data), email: r.data.email, role: r.data.role }))
+    return { list: (await c.D.all('staff')).filter(r => r.id !== who && r.id !== 'emergency').map(r => ({ id: r.id, name: nameOf(r.data), ...(c.user.role === 'auditor' ? {} : { email: r.data.email }), role: r.data.role }))
       .sort((p, q) => p.name.localeCompare(q.name)) };
   } },
   'GET /dm/threads': { auth: 'staff', act: 'view', async fn(c) {

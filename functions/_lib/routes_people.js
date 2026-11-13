@@ -1,6 +1,6 @@
 /* Staff routes: companies, trainers, trainees (+ batch import) and portal credentials. */
 import { H, S, str, need, bool, uid, audit, diff, traineeOut, trainerOut, stripSecret } from './core.js';
-import { claimLogin, genPassword, candidatePassword, pbk, rnd, loginKey } from './auth.js';
+import { claimLogin, genPassword, candidatePassword, pbk, rnd, loginKey, wideKey } from './auth.js';
 import { tempId, nextAtts, attFree } from './identity.js';
 import { unsign, slot } from './signs.js';
 
@@ -11,7 +11,7 @@ async function newCreds(c, role, wanted, id) {
   const login = await claimLogin(c.D, role, wanted, id), password = role === 'trainee' ? candidatePassword() : genPassword(), salt = rnd(16);
   return { login, password, salt, hash: await pbk(password, salt), pv: 0 };
 }
-async function resetCreds(acc, kind) { const password = kind === 'trainee' ? candidatePassword() : genPassword(); acc.salt = rnd(16); acc.hash = await pbk(password, acc.salt); acc.pv = (acc.pv || 0) + 1; return password; }
+async function resetCreds(acc, kind) { const password = kind === 'trainee' ? candidatePassword() : genPassword(); acc.salt = rnd(16); acc.hash = await pbk(password, acc.salt); delete acc.it; delete acc.pwAt; acc.pv = (acc.pv || 0) + 1; return password; }   // pwAt gone: a generated password again (settings.forcePw)
 const COL = { trainee: 'trainees', trainer: 'trainers', company: 'companies' };
 
 /* -------------------------------------------------------------- person form */
@@ -40,11 +40,14 @@ export function readPerson(b, { foreignAllowed = true, finOptional = false, phon
 
 /* reveal = the caller may see who already holds this ID/FIN (staff with fin.view only). Everyone else just learns "already registered". */
 export async function claimFin(D, fin, id, reveal = false) {
-  try { await D.insert('fins', fin, { id }); }
+  try { await D.insert('fins', fin, { id, at: new Date().toISOString() }); }
   catch (/** @type {any} */ e) {
     if (e instanceof H && e.message === 'dup') {
-      if (!reveal) throw new H(409, 'dupFin');
       const ex = await D.get('fins', fin), t = ex && await D.get('trainees', ex.id);
+      // a claim that belongs to nobody (a registration that failed half-way, or a person deleted by hand): taken over, unless
+      // it was made within the last minute (a registration of that person may be on its way right now)
+      if (!t && !(ex?.at && Date.now() - Date.parse(ex.at) < 60e3)) { await D.put('fins', [{ id: fin, data: { id, at: new Date().toISOString() } }]); return; }
+      if (!reveal) throw new H(409, 'dupFin');
       throw new H(409, 'dupFin', { existing: t ? { id: t.id, att: t.att, name: S.fullAz(t) } : null });
     }
     throw e;
@@ -79,17 +82,33 @@ export async function createTrainee(c, b, { strict = c.user?.kind !== 'staff' } 
   // without FIN or phone: a temporary account (no learner number yet); the candidate completes it at the first sign-in
   if (!p.fin || !p.phone) {
     const id = tempId(); if (p.fin) await claimFin(c.D, p.fin, id, canSeeFin(c));
-    const cred = await newCreds(c, 'trainee', id, id);
-    const t = { id, att: '', temp: true, ...p, co, on: true, consent: consentOf(c, b), createdAt: new Date(c.now()).toISOString(), createdBy: { kind: c.user?.kind || 'staff', name: c.user?.name || c.user?.email || '' }, login: cred.login, salt: cred.salt, hash: cred.hash, pv: 0 };
-    await c.D.put('trainees', [{ id, data: t }]);
-    return { t, password: cred.password, sameName };
+    try {
+      const cred = await newCreds(c, 'trainee', id, id);
+      const t = { id, att: '', temp: true, ...p, co, on: true, consent: consentOf(c, b), createdAt: new Date(c.now()).toISOString(), createdBy: { kind: c.user?.kind || 'staff', name: c.user?.name || c.user?.email || '' }, login: cred.login, salt: cred.salt, hash: cred.hash, pv: 0 };
+      await c.D.put('trainees', [{ id, data: t }]);
+      return { t, password: cred.password, sameName };
+    } catch (e) { if (p.fin) await releaseFin(c.D, p.fin, id); throw e; }
   }
   const [att] = await nextAtts(c);
   if (p.fin) await claimFin(c.D, p.fin, att, canSeeFin(c));
-  const cred = await newCreds(c, 'trainee', att, att);
-  const t = { id: att, att, ...p, co, on: true, consent: consentOf(c, b), createdAt: new Date(c.now()).toISOString(), createdBy: { kind: c.user?.kind || 'staff', name: c.user?.name || c.user?.email || '' }, login: cred.login, salt: cred.salt, hash: cred.hash, pv: 0 };
-  await c.D.put('trainees', [{ id: att, data: t }]);
-  return { t, password: cred.password };
+  try {
+    const cred = await newCreds(c, 'trainee', att, att);
+    const t = { id: att, att, ...p, co, on: true, consent: consentOf(c, b), createdAt: new Date(c.now()).toISOString(), createdBy: { kind: c.user?.kind || 'staff', name: c.user?.name || c.user?.email || '' }, login: cred.login, salt: cred.salt, hash: cred.hash, pv: 0 };
+    await c.D.put('trainees', [{ id: att, data: t }]);
+    return { t, password: cred.password };
+  } catch (e) { if (p.fin) await releaseFin(c.D, p.fin, att); throw e; }
+}
+/* the registration failed after its ID/FIN was claimed: the claim is given back (only if it is still this one) */
+export async function releaseFin(D, fin, id) { try { const ex = await D.get('fins', fin); if (ex?.id === id) await D.del('fins', fin); } catch {} }
+/* Rebuilds the ID/FIN register from the people themselves (System -> repair): claims of nobody are removed, missing ones added. */
+export async function rebuildFins(c) {
+  const [fins, people] = await Promise.all([c.D.all('fins'), c.D.query('trainees', { where: [['fin', 'empty', false]], fields: ['fin'] })]);
+  const want = new Map(), dup = []; for (const r of people.rows) { if (want.has(r.data.fin)) dup.push(r.data.fin); else want.set(r.data.fin, r.id); }
+  const have = new Map(fins.map(r => [r.id, r.data?.id])), fresh = new Date(c.now() - 60e3).toISOString();
+  const drop = fins.filter(r => !want.has(r.id) && !(r.data?.at > fresh)).map(r => r.id), add = [...want].filter(([fin, id]) => have.get(fin) !== id && !dup.includes(fin));
+  if (drop.length) await c.D.delMany('fins', drop);
+  if (add.length) await c.D.put('fins', add.map(([fin, id]) => ({ id: fin, data: { id, at: new Date(c.now()).toISOString() } })));
+  return { removed: drop.length, added: add.length, shared: [...new Set(dup)].length };
 }
 
 /** @type {import('../../types/store').Routes} */
@@ -220,7 +239,7 @@ export const peopleRoutes = {
     if (ok.length) {
       const atts = await nextAtts(c, ok.length), now = new Date(c.now()).toISOString();
       ok.forEach((x, i) => (x.att = atts[i]));
-      const claimed = new Set(await c.D.insertMany('fins', ok.filter(x => x.p.fin).map(x => ({ id: x.p.fin, data: { id: x.att } }))));
+      const claimed = new Set(await c.D.insertMany('fins', ok.filter(x => x.p.fin).map(x => ({ id: x.p.fin, data: { id: x.att, at: now } }))));
       const fresh = ok.filter(x => !x.p.fin || claimed.has(x.p.fin));
       for (const x of ok) if (x.p.fin && !claimed.has(x.p.fin)) {
         const ex = await c.D.get('fins', x.p.fin), t = ex && await c.D.get('trainees', ex.id);
@@ -250,7 +269,7 @@ export const peopleRoutes = {
     for (const id of ids) {
       const x = await c.D.get(col, id); if (!x) continue;
       const password = await resetCreds(x, b.kind); await c.D.put(col, [{ id, data: x }]);
-      await c.D.lockOk(loginKey(b.kind, x.login));
+      await c.D.lockOk(loginKey(b.kind, x.login)); await c.D.lockOk(wideKey(loginKey(b.kind, x.login)));
       out.push({ id, name: b.kind === 'company' ? x.name : S.fullAz(x), att: x.att, login: x.login, password });
     }
     await audit(c, 'credentials.reset', `${b.kind} x${out.length}: ${out.map(o => o.login).slice(0, 8).join(', ')}`, { entity: out.length === 1 ? { kind: b.kind, id: out[0].id, label: out[0].name } : undefined });

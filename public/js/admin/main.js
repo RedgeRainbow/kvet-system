@@ -40,7 +40,9 @@ mountPortal({ kind: 'staff', titleKey: 'portalStaff', async boot({ app, signOut,
     for (const x of $('#nav').children) { if (x.classList.contains('grp')) { g = x.dataset.grp; x.classList.toggle('closed', cl.has(g)); x.setAttribute('aria-expanded', String(!cl.has(g))); } else if (g) x.classList.toggle('folded', cl.has(g)); } };
   $('#nav').addEventListener('click', e => { const h = e.target.closest('.grp'); if (!h) return; const cl = closedSet(), g = h.dataset.grp; cl.has(g) ? cl.delete(g) : cl.add(g); try { localStorage[LSK] = JSON.stringify([...cl]); } catch {} applyNav(); });
   applyNav();
+  let turn = 0;
   const route = async () => {
+    const my = ++turn;      // a page still loading when the person moves on draws into an area that is gone: its result and its errors are dropped
     cleanup?.(); cleanup = null;
     // a fresh page area: handlers one page put on it (e.g. a row click opening a group) must not act on the next page
     { const v = $('#view'), n = v.cloneNode(false); v.replaceWith(n); }
@@ -51,8 +53,8 @@ mountPortal({ kind: 'staff', titleKey: 'portalStaff', async boot({ app, signOut,
     const loader = PAGES[page] || PAGES.dashboard, v = view(), first = v?.firstElementChild, moved = page !== shown; shown = page;
     // a new section: placeholder if it is not ready within a moment (a refresh of the same section keeps its content)
     const ph = moved && v ? setTimeout(() => { if (v.firstElementChild === first) v.innerHTML = SKEL; }, 140) : 0;
-    try { const m = await loader(); cleanup = (await m.default({ args, rerender: route, go: h => { location.hash = '#/' + h; } })) || null; }
-    catch (/** @type {any} */ e) { if (e.status === 401 || e.status === 403) throw e; fail(e); view().innerHTML = `<div class="card"><p>${esc(t('server'))}</p></div>`; }
+    try { const m = await loader(), end = (await m.default({ args, rerender: route, go: h => { location.hash = '#/' + h; } })) || null; if (my !== turn) { end?.(); return; } cleanup = end; }
+    catch (/** @type {any} */ e) { if (e.status === 401 || e.status === 403) throw e; if (my !== turn) return; fail(e); view().innerHTML = `<div class="card"><p>${esc(t('server'))}</p></div>`; }
     finally { clearTimeout(ph); }
     badges();
   };

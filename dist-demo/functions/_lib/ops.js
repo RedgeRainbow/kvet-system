@@ -1,5 +1,5 @@
 /* Operations that both staff and trainers can perform on an enrolment. */
-import { H, S, need, str, num, enrOf, saveEnr, audit } from './core.js';
+import { H, S, need, str, num, enrOf, saveEnr, saveEnrs, enrsOfIds, audit, auditMany } from './core.js';
 import { sign, unsign, slot } from './signs.js';
 import { notify } from './routes_notify.js';
 
@@ -57,38 +57,53 @@ export async function confirmFor(c, sid, tid, undo = false) {
 export async function rollCall(c, sid, absentIds = /** @type {any[]} */ ([]), askedDay = '') {
   const s = await loadSession(c, sid); need(!s.cancelled && !s.closed, 'sessionClosed', 409); need(c.today() >= s.date, 'notStarted', 409);
   const absent = new Set((absentIds || []).map(x => str(x, 60))), by = c.user.kind === 'trainer' ? 'trainer' : 'staff', at = new Date(c.now()).toISOString(), out = { present: 0, absent: 0 };
+  // everybody's enrolment is read together and the changed ones are written together (a class of 30 used to take ~100
+  // database calls here, one person at a time; it now takes about ten)
+  const enrs = await enrsOfIds(c.D, s.id, s.traineeIds || []), save = [], log = [];
   // several days (e.g. 2 credits = 2 days): one roll call per day; "attended" = present on at least one day
   if (S.sessionDays(s).length > 1) {
     const asked = str(askedDay, 10);
     // a named day must belong to the session and have come; never fall back silently (that would overwrite another day)
     if (asked) need(S.sessionDays(s).includes(asked) && asked <= c.today(), 'dayNotYet', 409);
     const day = asked || S.rollDay(s, c.today(), ''); need(day, 'notStarted', 409); out.day = day;
-    for (const tid of s.traineeIds || []) {
-      const e = await enrOf(c.D, s.id, tid); e.days ||= {};
+    for (const e of enrs) {
+      const tid = e.tid; e.days ||= {};
       const was = JSON.stringify(e.days[day] || null);
       e.days[day] = absent.has(tid) ? { absent: { at, by } } : { at: e.days[day]?.at || at, by: e.days[day]?.by || by };
       const marks = Object.values(e.days), firstIn = marks.filter(m => m.at).map(m => m.at).sort()[0];
       if (firstIn) { if (!e.att) { e.att = firstIn; e.attBy = by; } delete e.absent; }
       else if (!(e.fb || e.ev || e.prac || e.exam || e.test || e.final)) { delete e.att; delete e.attBy; e.absent = { at, by }; }
-      if (JSON.stringify(e.days[day]) !== was) { await saveEnr(c.D, e); await audit(c, absent.has(tid) ? 'attendance.absent' : 'attendance.confirm', `${s.id} ${tid} ${day}`); }
+      if (JSON.stringify(e.days[day]) !== was) { save.push(e); log.push([absent.has(tid) ? 'attendance.absent' : 'attendance.confirm', `${s.id} ${tid} ${day}`]); }
       absent.has(tid) ? out.absent++ : out.present++;
     }
+    await saveEnrs(c.D, save); await auditMany(c, log);
     await unsign(c, attSlots(s, day));
     return out;
   }
-  for (const tid of s.traineeIds || []) {
-    const e = await enrOf(c.D, s.id, tid);
+  for (const e of enrs) {
+    const tid = e.tid;
     if (absent.has(tid)) {
       if (e.att && (e.fb || e.ev || e.prac || e.exam || e.test || e.final)) continue;     // has results: stays present
-      if (e.att || !e.absent) { delete e.att; delete e.attBy; e.absent = { at, by }; await saveEnr(c.D, e); await audit(c, 'attendance.absent', `${s.id} ${tid}`); }
+      if (e.att || !e.absent) { delete e.att; delete e.attBy; e.absent = { at, by }; save.push(e); log.push(['attendance.absent', `${s.id} ${tid}`]); }
       out.absent++;
     } else {
-      if (!e.att) { e.att = at; e.attBy = by; delete e.absent; await saveEnr(c.D, e); await audit(c, 'attendance.confirm', `${s.id} ${tid}`); }
+      if (!e.att) { e.att = at; e.attBy = by; delete e.absent; save.push(e); log.push(['attendance.confirm', `${s.id} ${tid}`]); }
       out.present++;
     }
   }
+  await saveEnrs(c.D, save); await auditMany(c, log);
   await unsign(c, attSlots(s));
   return out;
+}
+/* "Confirm all": everybody without confirmed attendance is confirmed, in one go (the same rules as confirmFor for each) */
+export async function confirmAll(c, s) {
+  const todo = (await enrsOfIds(c.D, s.id, s.traineeIds || [])).filter(e => !e.att); if (!todo.length) return 0;
+  need(!s.cancelled && !s.closed, 'sessionClosed', 409); need(c.today() >= s.date, 'notStarted', 409);
+  const at = new Date(c.now()).toISOString(), by = c.user.kind === 'trainer' ? 'trainer' : 'staff', day = S.sessionDays(s).length > 1 ? S.rollDay(s, c.today(), '') : '';
+  for (const e of todo) { e.att = at; e.attBy = by; delete e.absent; if (day) { e.days ||= {}; if (!e.days[day]?.at) e.days[day] = { at, by }; } }
+  await saveEnrs(c.D, todo); await auditMany(c, todo.map(e => ['attendance.confirm', `${s.id} ${e.tid}`]));
+  await unsign(c, attSlots(s, S.multiDay(s) ? day : ''));
+  return todo.length;
 }
 
 export async function saveEvaluation(c, sid, tid, b) {

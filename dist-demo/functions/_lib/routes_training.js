@@ -148,7 +148,7 @@ export const trainingRoutes = {
     need(!f.time || /^\d{2}:\d{2}$/.test(f.time), 'badInput');
     if (f.sheetId) need(await c.D.get('sheets', f.sheetId), 'badInput');
     for (const m of f.materials) { const mx = await c.D.get('materials', m); need(mx, 'badInput'); need(S.usable(mx), 'materialNotApproved', 409); }
-    for (const t of f.traineeIds) need(await c.D.get('trainees', t), 'badInput');
+    for (const t of await Promise.all(f.traineeIds.map(id => c.D.get('trainees', id)))) need(t, 'badInput');
     const link = httpUrl(b.examLink); need(link !== null, 'badLink'); f.examLink = link;
     // exam: none | external link | test from the question bank (old sessions with only a link count as 'link')
     f.examMode = ['', 'link', 'bank'].includes(b.examMode) ? b.examMode : link ? 'link' : ''; f.examId = '';
@@ -163,6 +163,13 @@ export const trainingRoutes = {
     let s;
     if (b.id) {
       s = await c.D.get('sessions', str(b.id, 60)); need(s, 'noRec', 404);
+      // The form sends its whole candidate list. With baseIds (the list as the form loaded it) only what the person changed
+      // in the form is applied to the list as it is NOW: a candidate the trainer added in the meantime stays, one the
+      // trainer removed is not brought back.
+      if (Array.isArray(b.baseIds)) {
+        const base = new Set(b.baseIds.map(x => str(x, 60))), sent = new Set(f.traineeIds), cur = s.traineeIds || [];
+        f.traineeIds = [...cur.filter(id => !(base.has(id) && !sent.has(id))), ...f.traineeIds.filter(id => !base.has(id) && !cur.includes(id))].slice(0, 500);
+      }
       for (const gone of (s.traineeIds || []).filter(t => !f.traineeIds.includes(t))) {
         const e = await c.D.get('enr', enrId(s.id, gone));
         if (e && (e.att || e.fb || e.ev || e.prac || e.exam || e.final)) throw new H(409, 'hasData', { tid: gone });
@@ -413,7 +420,20 @@ async function release(c, sid, tid, { no, expiry: wanted, signMode = '' } = {}) 
   const o = S.computeOutcome(e, s, outcomeOpts(st));
   if (o.outcome.startsWith('PENDING')) throw new H(409, { PENDING_PRACTICAL: 'needPractical', PENDING_FEEDBACK: 'needFeedback' }[o.outcome] || 'needExam');
   const key = enrId(s.id, e.tid);
-  try { await c.D.insert('rel', key, { at: new Date(c.now()).toISOString(), by: c.user.email }); } catch (/** @type {any} */ x) { if (x instanceof H && x.message === 'dup') throw new H(409, 'alreadyReleased'); throw x; }
+  try { await c.D.insert('rel', key, { at: new Date(c.now()).toISOString(), by: c.user.email }); } catch (/** @type {any} */ x) {
+    if (!(x instanceof H && x.message === 'dup')) throw x;
+    // Reserved, but no result on the enrolment: an earlier release stopped half-way. If it got as far as the certificate, that
+    // certificate is the result (never a second one); a reservation older than two minutes with nothing behind it is taken over.
+    const made = (await c.D.query('certs', { where: [['sid', 'eq', s.id], ['tid', 'eq', e.tid], ['revoked', 'null', true]], limit: 1 })).rows[0]?.data;
+    if (made) {
+      e.final = { outcome: 'PASS', certNo: made.no, at: made.issuedAt, by: made.by }; await saveEnr(c.D, e);
+      await audit(c, 'release.recovered', `${made.no} ${s.id} ${e.tid}`, { entity: { kind: 'cert', id: made.no, label: made.no } });
+      return { result: 'PASS', cert: made, recovered: true };
+    }
+    const r = await c.D.get('rel', key); if (r && c.now() - Date.parse(r.at) < 120e3) throw new H(409, 'alreadyReleased');
+    await c.D.put('rel', [{ id: key, data: { at: new Date(c.now()).toISOString(), by: c.user.email, tookOver: true } }]);
+  }
+  /** @type {any} */ let made = null;
   try {
     const at = new Date(c.now()).toISOString();
     if (o.outcome !== 'PASS') {
@@ -430,12 +450,13 @@ async function release(c, sid, tid, { no, expiry: wanted, signMode = '' } = {}) 
       start: s.date, end, expiry, issuedAt: at, by: c.user.email, vh: await vh(c.env, n), snap: buildSnap({ trainee, company, trainer, blank, st, session: s }),
       // with certificate approval on, the certificate reaches the candidate / company / QR page only after the approver's decision
       ...(S.approvalsCfg(st).certs ? { approval: { status: 'pending', at, by: c.user.email } } : {}) }));
+    made = doc;
     e.final = { outcome: 'PASS', certNo: doc.no, at, by: c.user.email }; await saveEnr(c.D, e);
     await audit(c, 'release.pass', `${doc.no} ${trainee.att}`, { entity: { kind: 'cert', id: doc.no, label: doc.no } });
     // optional: sign straight away (admin / superadmin only)
     if (signMode && S.can(c.user.role, 'cert.sign')) { try { return { result: 'PASS', cert: await signCert(c, doc.no, signMode) }; } catch (/** @type {any} */ x) { if (!(x instanceof H)) throw x; return { result: 'PASS', cert: doc, signError: x.message }; } }
     return { result: 'PASS', cert: doc };
-  } catch (/** @type {any} */ x) { if (!e.final) await c.D.del('rel', key).catch(() => {}); throw x; }
+  } catch (/** @type {any} */ x) { if (!made) await c.D.del('rel', key).catch(() => {}); throw x; }   // a certificate exists: the reservation stays, the next try finishes it
 }
 
 /* Trainer double-booked, or the same room used twice at overlapping dates (same start time or no time given). */

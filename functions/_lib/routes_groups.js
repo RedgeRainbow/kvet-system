@@ -5,7 +5,7 @@ import { str, need, uid, audit } from './core.js';
 async function readGroup(c, b) {
   const name = str(b.name, 120); need(name, 'needName');
   const ids = [...new Set((b.traineeIds || []).map(x => str(x, 60)))].slice(0, 1000);
-  for (const id of ids) need(await c.D.get('trainees', id), 'badInput');
+  for (const t of await Promise.all(ids.map(id => c.D.get('trainees', id)))) need(t, 'badInput');
   return { name, note: str(b.note, 500), traineeIds: ids };
 }
 /** @type {import('../../types/store').Routes} */

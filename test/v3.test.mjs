@@ -258,7 +258,7 @@ test('electronic signatures: certificates only by admin/superadmin under their n
   const tk = (await call('POST', '/login', { body: { role: 'trainer', login: tr.creds.login, password: tr.creds.password } })).json.token;
   assert.equal((await call('POST', '/portal/trainer/confirm-all', { token: tk, body: { sid: s.id } })).json.confirmed, 1);
   // attendance: trainer signs; a later attendance change withdraws it
-  const as = (await call('POST', '/portal/trainer/sign/att', { token: tk, body: { sid: s.id } })).json.sign; assert.match(as.code, /^[0-9A-F]{4}-[0-9A-F]{4}$/); assert.ok(as.name.includes('Rəşad'));
+  const as = (await call('POST', '/portal/trainer/sign/att', { token: tk, body: { sid: s.id } })).json.sign; assert.match(as.code, /^[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}$/); assert.ok(as.name.includes('Rəşad'));
   assert.equal((await call('GET', '/verify-sign?c=' + as.code)).json.status, 'VALID');
   await call('POST', '/enr/confirm', { token: sa, body: { sid: s.id, tid: t1.trainee.id, undo: true } });
   assert.equal((await call('GET', '/session?id=' + s.id, { token: sa })).json.signs.att, null);
