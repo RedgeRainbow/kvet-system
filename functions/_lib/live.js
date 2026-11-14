@@ -40,7 +40,7 @@ export function tracked(D) {
     let keys = [...t.keys]; const per = keys.filter(k => k.startsWith('rev|p|') && k !== 'rev|p|*');
     if (per.length > 10) keys = [...keys.filter(k => !per.includes(k) && k !== 'rev|p|*'), 'rev|p|*'];
     if (keys.length > 30) keys = [...keys.filter(k => k.startsWith('rev|c|') || k === 'rev|p|*').slice(0, 25), ...keys.filter(k => k.startsWith('rev|s|') || k.startsWith('rev|t|')).slice(0, 5)];
-    await Promise.all([D.seq('rev'), ...keys.map(k => D.seq(k))]).catch(() => {});
+    await D.seqMany(['rev', ...keys]).catch(() => {});                 // one call for all of them
   };
   return { D: wrap, flush };
 }

@@ -48,7 +48,8 @@ export async function forgetAccounts(c, keys) {
     const notes = (await c.D.query('notes', { where: [['to', 'in', part]], limit: 20000, fields: ['to'] })).rows.map(r => r.id);
     if (msgs.length) await c.D.delMany('msgs', msgs);
     if (notes.length) await c.D.delMany('notes', notes);
-    for (const k of part) await doneNotes(c, 'msg:s:' + k);
+    const done = (await c.D.query('notes', { where: [['ref', 'in', part.map(k => 'msg:s:' + k)]], limit: 20000, fields: ['ref'] })).rows.map(r => r.id);      // one call for all of them (it was one per account)
+    if (done.length) await c.D.delMany('notes', done);
     await c.D.delMany('threads', part); await c.D.delMany('nseen', part);
   }
 }

@@ -7,6 +7,7 @@
    - blank     -> its sessions go (see above), remaining certificates of that training are archived
    - trainer / company / practical sheet / presentation -> removed; records that pointed at them are kept and just lose the link
    - enrolment (Issue queue row) -> the trainee leaves that session; enrolment data goes, its certificate is archived */
+import { withId } from './store.js';
 import { S, enrId, getMany, sessionsOf } from './core.js';
 import { forgetAccounts } from './routes_notify.js';
 import { loginKey } from './auth.js';
@@ -14,8 +15,10 @@ import { loginKey } from './auth.js';
 export const KINDS = ['blank', 'sheet', 'material', 'company', 'trainer', 'trainee', 'session', 'cert', 'enrol'];
 
 export async function loadWorld(c) {
-  const rows = async col => (await c.D.all(col)).map(r => r.data);
-  const [sessions, enrs, certs, trainees, trainers, companies, blanks, sheets, materials, groups] = await Promise.all(['sessions', 'enr', 'certs', 'trainees', 'trainers', 'companies', 'blanks', 'sheets', 'materials', 'groups'].map(rows));
+  // one call per page for all ten collections (store.scanAll), not one per collection: a Worker's request has few calls to spend
+  const COLS = ['sessions', 'enr', 'certs', 'trainees', 'trainers', 'companies', 'blanks', 'sheets', 'materials', 'groups'], /** @type {Record<string, any[]>} */ got = Object.fromEntries(COLS.map(k => [k, []]));
+  await c.D.scanAll(COLS, page => { for (const r of page) got[r.col].push(withId(r.col, r.id, r.data)); });
+  const [sessions, enrs, certs, trainees, trainers, companies, blanks, sheets, materials, groups] = COLS.map(k => got[k]);
   const by = list => new Map(list.map(x => [x.id, x]));
   return { sessions, enrs, certs, trainees, trainers, companies, blanks, sheets, materials, groups, sById: by(sessions), tById: by(trainees), certByNo: new Map(certs.map(x => [x.no, x])), enrBy: new Map(enrs.map(e => [enrId(e.sid, e.tid), e])) };
 }

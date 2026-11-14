@@ -298,6 +298,10 @@ declare r bigint; begin
 create or replace function next_seq_n(n text, k int) returns bigint language plpgsql as $$
 declare v bigint; begin
  insert into counters(name,val) values(n,k) on conflict(name) do update set val=counters.val+k returning val into v; return v; end $$;
+-- several counters raised by one in ONE call (v3.36: the live-update counters after a write were one call each)
+create or replace function next_seq_many(names text[]) returns void language sql as $$
+  insert into counters(name,val) select distinct x, 1 from unnest(names) x on conflict(name) do update set val=counters.val+1
+$$;
 alter table counters enable row level security; revoke all on counters from anon, authenticated;
 
 -- ---------------------------------------------------------------- login throttling, inside the database (parallel attempts cannot slip past)
@@ -375,6 +379,20 @@ create or replace function records_fingerprint() returns table(col text, n bigin
   select r.col, count(*), md5(string_agg(r.id || ':' || md5(r.data::text), ',' order by r.id)) from records r group by r.col order by r.col
 $$;
 
+-- Many records of one collection deleted by id in ONE call (v3.36). The ids travel in the request body; before, they went
+-- into the address, about 200 per call, so deleting 5,000 people took some 150 calls.
+create or replace function records_delete(p_col text, p_ids text[]) returns bigint language plpgsql as $$
+declare n bigint; begin delete from records where col = p_col and id = any(p_ids); get diagnostics n = row_count; return n; end $$;
+
+-- Several collections read in ONE call per page (v3.36): backups, the safety copy before a restore, and "delete old data"
+-- used one call per collection - about 35 calls before any work, where the Workers Free plan allows 50 per request.
+-- Rows come ordered by (col, id); the next page starts after the last row of this one.
+create or replace function records_page(cols text[], after_col text, after_id text, n int) returns table(col text, id text, data jsonb) language sql stable as $$
+  select r.col, r.id, r.data from records r
+  where r.col = any(cols) and (after_col is null or (r.col, r.id) > (after_col, after_id))
+  order by r.col, r.id limit greatest(1, least(n, 10000))
+$$;
+
 -- ---------------------------------------------------------------- the audit trail is append-only, also for the service key
 -- The app only ever adds rows. These rules make that a property of the database: a row of the audit trail cannot be
 -- changed or deleted, and the table cannot be emptied, by anybody who is not the database owner working in the SQL Editor
@@ -444,8 +462,8 @@ create or replace function table_sizes() returns table(col text, rows bigint, by
   select substr(c.relname, 5), c.reltuples::bigint, pg_total_relation_size(c.oid)
   from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'records'::regclass order by 3 desc $$;
 
-revoke execute on function next_seq(text), bump_seq(text, bigint), next_seq_n(text,int), login_fail(text,int,int), login_state(text), login_ok(text), login_sweep(timestamptz),
-  apply_restore(text[],jsonb), records_in(text, text, text[], text[]), patch_record(text, text, jsonb, jsonb, jsonb), patch_records(text, jsonb), records_fingerprint(), audit_page(jsonb), db_size(), table_sizes() from public, anon, authenticated;
+revoke execute on function next_seq(text), bump_seq(text, bigint), next_seq_n(text,int), next_seq_many(text[]), login_fail(text,int,int), login_state(text), login_ok(text), login_sweep(timestamptz),
+  apply_restore(text[],jsonb), records_in(text, text, text[], text[]), patch_record(text, text, jsonb, jsonb, jsonb), patch_records(text, jsonb), records_fingerprint(), records_page(text[], text, text, int), records_delete(text, text[]), audit_page(jsonb), db_size(), table_sizes() from public, anon, authenticated;
 
 -- ---------------------------------------------------------------- indexes (each on its own collection table)
 -- Every list the app shows is filtered, counted and paged by the database; these keep it fast with years of data.

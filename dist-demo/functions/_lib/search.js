@@ -32,8 +32,11 @@ export function renewedMap(list) {
   return new Map(list.map(c => [c.no, !c.revoked && newest.get(c.bid) !== c ? newest.get(c.bid).no : null]));
 }
 async function renewals(D, tids) {
-  await Promise.all([...new Set([...tids].filter(Boolean))].map(async tid => {
-    const list = (await D.byField('certs', 'tid', tid)).map(r => r.data), m = renewedMap(list);
+  // the certificates of all these people in one read (it was one read per person: a batch delete of 1,000 people made 1,000 calls)
+  const ids = [...new Set([...tids].filter(Boolean))]; if (!ids.length) return;
+  /** @type {Map<string, any[]>} */ const by = new Map(ids.map(t => [t, []])); for (const r of await D.inList('certs', 'tid', ids)) by.get(r.data.tid)?.push(r.data);
+  await Promise.all(ids.map(async tid => {
+    const list = by.get(tid) || [], m = renewedMap(list);
     const fix = list.filter(c => (c.renewed || null) !== m.get(c.no)).map(c => { const x = { ...c }; if (m.get(c.no)) x.renewed = m.get(c.no); else delete x.renewed; return { id: c.no, data: withSk('certs', x) }; });
     if (fix.length) await D.put('certs', fix);
   }));

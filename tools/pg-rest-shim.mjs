@@ -67,7 +67,9 @@ export function startShim({ port = 54330, psql = ['psql'], log = false } = {}) {
     if (!fns.has(name)) { const r = await run(`select json_build_object('names', proargnames, 'types', (select array_agg(t::regtype::text order by o) from unnest(proargtypes) with ordinality as x(t, o)), 'set', proretset, 'ret', prorettype::regtype::text) from pg_proc where proname = ${lit(name)} and pronamespace = 'public'::regnamespace limit 1`); if (!r) throw err(404, `Could not find the function public.${name} in the schema cache`, 'PGRST202'); fns.set(name, JSON.parse(r)); }
     return fns.get(name);
   }
+  let reqs = 0;                                                    // requests since the last count(): each is one sub-request of a Worker
   const server = http.createServer(async (req, res) => {
+    reqs++;
     const chunks = []; for await (const c of req) chunks.push(c); const body = Buffer.concat(chunks).toString('utf8'), url = new URL(req.url, 'http://x'), path = url.pathname.replace(/^\/rest\/v1\//, ''), prefer = String(req.headers.prefer || '');
     try {
       let out = '', headers = {};
@@ -97,5 +99,5 @@ export function startShim({ port = 54330, psql = ['psql'], log = false } = {}) {
       res.writeHead(e.status || 500, { 'content-type': 'application/json' }); res.end(JSON.stringify({ code: e.code || 'SHIM', message: e.message }));
     }
   });
-  return new Promise(ok => server.listen(port, '127.0.0.1', () => ok({ url: `http://127.0.0.1:${port}`, close: () => server.close(), run })));
+  return new Promise(ok => server.listen(port, '127.0.0.1', () => ok({ url: `http://127.0.0.1:${port}`, close: () => server.close(), run, count: () => { const n = reqs; reqs = 0; return n; } })));
 }

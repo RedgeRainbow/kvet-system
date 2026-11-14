@@ -219,3 +219,32 @@ test('certificates on the Free plan (the switch is off, as after an upgrade): th
   assert.equal((await call('GET', '/portal/trainee/cert/sig' + q, { token: tok })).status, 404);
   assert.equal((await call('GET', '/portal/trainee/cert.pdf' + q, { token: tok })).status, 200);
 });
+
+/* ---- the Workers Free plan allows 50 outgoing calls per request ---- */
+import { createHandler } from '../functions/_lib/index.js';
+import { memoryStore, memoryBucket } from '../functions/_lib/store.js';
+import { memoryAuth } from '../functions/_lib/auth.js';
+async function countedSystem(people) {
+  let n = 0; const count = o => new Proxy(o, { get: (t, k) => (typeof t[k] === 'function' ? (...a) => { n++; return t[k](...a); } : t[k]) });
+  const auth = memoryAuth(), handle = createHandler({ store: (s => () => s)(count(memoryStore())), bucket: (b => () => b)(count(memoryBucket())), auth: () => auth, now: () => Date.parse('2026-10-29T08:00:00Z'), files: () => siteFile });
+  const env = { TOKEN_SECRET: 'test-secret-test-secret', BOOTSTRAP_ADMIN_EMAIL: 'boss@kvet.az' }; auth.addUser('boss@kvet.az', 'bosspass123');
+  const call = async (method, path, { token, body } = {}) => { n = 0; const res = await handle(new Request('https://t.test/api' + path, { method, headers: { ...(token ? { authorization: 'Bearer ' + token } : {}), ...(body ? { 'content-type': 'application/json' } : {}) }, body: body && JSON.stringify(body) }), env); return { status: res.status, json: await res.json().catch(() => null), calls: n }; };
+  const sa = (await call('POST', '/staff/login', { body: { email: 'boss@kvet.az', password: 'bosspass123' } })).json.access; await call('POST', '/seed', { token: sa, body: {} });
+  const tr = (await call('POST', '/trainer/save', { token: sa, body: { name: 'Taleh', surname: 'Bekirov', fin: 'TRN1234', phone: '+994502223344' } })).json, co = (await call('POST', '/company/save', { token: sa, body: { name: 'Drill LLC' } })).json;
+  const ids = []; for (let i = 0; i < people; i++) ids.push((await call('POST', '/trainee/save', { token: sa, body: { name: 'Ad' + i, surname: 'Soyad' + i, fin: 'A' + String(100000 + i), phone: '+9945012' + String(10000 + i), consent: true, co: i % 2 ? co.company.id : '' } })).json.trainee.id);
+  const st = (await call('GET', '/state', { token: sa })).json;
+  for (let k = 0; k < 3; k++) { await call('POST', '/session/save', { token: sa, body: { bid: st.blanks[0].id, tid: tr.trainer.id, date: '2026-10-2' + k, traineeIds: ids } }); for (const id of ids.slice(0, 6)) await call('POST', '/cert/issue-direct', { token: sa, body: { tid: id, bid: st.blanks[k % st.blanks.length].id, start: '2026-10-2' + k, end: '2026-10-2' + k } }); }
+  return { call, sa };
+}
+test('"Delete old data" and restore fit the 50 calls of the Workers Free plan, however many people there are', async () => {
+  const kinds = ['sessions', 'enrolments', 'trainees', 'trainers', 'companies', 'blanks', 'sheets', 'materials', 'archive', 'snaps'], seen = [];
+  for (const people of [8, 40]) {
+    const { call, sa } = await countedSystem(people);
+    const b = await call('POST', '/backup', { token: sa, body: {} }), dry = await call('POST', '/purge', { token: sa, body: { kinds, dry: true } }), p = await call('POST', '/purge', { token: sa, body: { kinds, confirm: 'DELETE' } });
+    assert.equal(p.status, 200); assert.equal(p.json.impact.trainees, people);
+    const r = await call('POST', '/restore', { token: sa, body: { key: p.json.backup } }); assert.equal(r.status, 200);
+    assert.equal((await call('GET', '/trainees/find?size=1', { token: sa })).json.total, people, 'everybody is back');
+    seen.push([b.calls, dry.calls, p.calls, r.calls]); for (const [i, n] of seen.at(-1).entries()) assert.ok(n <= 40, `${['backup', 'preview', 'delete', 'restore'][i]} with ${people} people: ${n} calls`);
+  }
+  for (const i of [0, 1, 2, 3]) assert.ok(Math.abs(seen[0][i] - seen[1][i]) <= 3, `the number of calls does not grow with the number of people: ${seen[0]} / ${seen[1]}`);
+});

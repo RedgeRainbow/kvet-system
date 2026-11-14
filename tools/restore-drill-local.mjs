@@ -70,6 +70,21 @@ ok(v.total >= rowsIn, `${key}: ${v.total} records, ${(await bucket.head(key)).si
 const copy = new Uint8Array(await (await call('GET', '/backup/get?key=' + encodeURIComponent(key), { token: sa })).res.arrayBuffer());
 ok(new TextDecoder('latin1').decode(copy).slice(0, 4) === 'KVB1' && !new TextDecoder('latin1').decode(copy).includes('Z999999'), 'the stored file is encrypted (no ID/FIN readable in it)');
 
+step('P. "Delete old data" with every box ticked (System page), then restore the safety backup it made');
+// The Workers Free plan allows 50 outgoing calls per request; the numbers below are the calls each request made to the database.
+const FREE = 50, KINDS = ['sessions', 'enrolments', 'trainees', 'trainers', 'companies', 'blanks', 'sheets', 'materials', 'archive', 'snaps'];
+shim.count(); const dry = await call('POST', '/purge', { token: sa, body: { kinds: KINDS, dry: true } }), nDry = shim.count();
+ok(dry.status === 200 && dry.json.impact.trainees >= people, `preview: ${dry.json.impact.trainees} people, ${dry.json.impact.sessions} sessions, ${dry.json.impact.certs || 0} certificates (${nDry} database calls)`);
+clock += 60e3; const pr = await call('POST', '/purge', { token: sa, body: { kinds: KINDS, confirm: 'DELETE' } }), nPurge = shim.count();
+ok(pr.status === 200, `POST /purge -> ${pr.status}${pr.json?.error ? ' ' + pr.json.error : ''}: ${nPurge} database calls`);
+const emptied = await prints(sa); ok(!emptied.trainees && !emptied.sessions && !emptied.certs && !emptied.enr && !emptied.archive, 'no people, sessions, enrolments, certificates or archive left');
+shim.count(); clock += 60e3; const rP = await call('POST', '/restore', { token: sa, body: { key: pr.json.backup } }), nRestore = shim.count();
+ok(rP.status === 200, `POST /restore of ${pr.json.backup} -> ${rP.status}: ${rP.json.rows} records back, ${nRestore} database calls`);
+const afterP = await prints(sa), diffP = same(before, afterP, RESTORE_COLS.filter(c => c !== 'settings'));
+ok(!diffP.length, `identical to before the delete${diffP.length ? ' EXCEPT ' + diffP : ''}`);
+ok((await verify()) === 'ACTIVE', `certificate ${cert.no} verifies again`);
+ok(Math.max(nDry, nPurge, nRestore) < FREE, `every one of these requests stays under the ${FREE} calls of the Workers Free plan`);
+
 step('A. the data is deleted in the database, then restored in place');
 const blocked = await shim.run(`delete from records where col = 'audit'`).then(() => false, e => /audit trail/.test(e.message));
 ok(blocked, 'the audit trail refuses to be deleted (database rule)');

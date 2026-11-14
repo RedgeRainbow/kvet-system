@@ -87,7 +87,8 @@ const ASSET_MAX = 3e6, ASSETS_MAX = 60e6;
 export async function dumpTo(c, w, cols) {
   /** @type {Record<string, number>} */ const rows = {};
   await w.text(JSON.stringify({ kvet: 'backup', v: 3, at: new Date(c.now()).toISOString() }) + '\n');
-  for (const col of cols) { rows[col] = 0; await c.D.scan(col, async page => { let s = ''; for (const r of page) s += JSON.stringify({ c: col, id: r.id, d: r.data }) + '\n'; rows[col] += page.length; await w.text(s); }); }
+  for (const col of cols) rows[col] = 0;
+  await c.D.scanAll(cols, async page => { let s = ''; for (const r of page) { s += JSON.stringify({ c: r.col, id: r.id, d: r.data }) + '\n'; rows[r.col]++; } await w.text(s); });
   await w.text(JSON.stringify({ counters: await c.D.counters() }) + '\n');
   let sum = 0; for (const o of (await c.B.list({ prefix: 'assets/', limit: 1000 })).objects) {
     if (o.size > ASSET_MAX || sum + o.size > ASSETS_MAX) continue; const f = await c.B.get(o.key); if (!f) continue;

@@ -689,7 +689,7 @@ Not in this version (see the audit report, section 6): certificates drawn on the
 
 # v3.36 (after go-live: backups, certificates on the server, the audit page)
 
-**Before the deploy: run `schema.sql` again in Supabase** (it adds `records_fingerprint` and `audit_page`; no data changes; safe to repeat). Until it has run, the audit page works the old way and `GET /backup/fingerprint` answers from the application.
+**Before the deploy: run `schema.sql` again in Supabase** (it adds `records_fingerprint`, `audit_page`, `records_page`, `records_delete` and `next_seq_many`; no data changes; safe to repeat). Until it has run, everything works the old way - which means "Delete old data" and Restore still fail on the Workers Free plan.
 **After the deploy:** set `BACKUP_KEY` and store a copy outside Cloudflare, then run the staging restore drill (DEPLOY.md 3c). Old `.json` backups stay restorable.
 
 | # | Item | Fix | Test |
@@ -703,6 +703,7 @@ Not in this version (see the audit report, section 6): certificates drawn on the
 | 7 | The electronic-signature line of a certificate ran off the right edge since codes became longer (v3.35) | It grows to the left instead (browser and PDF) | visual comparison |
 | 8 | The audit page read whole months into the worker and filtered there | `audit_page` in the database: one day 5 ms, three months of 118,000 rows 0.4 s on a 600,000-row trail; the old way remains as a fallback until `schema.sql` has run. A "to" date without "from" no longer returns nothing | phase4 world + 27 filter combinations compared with the old rules |
 | 9 | A trainer account could upload question pictures without limit (L14) | 100 new pictures a day per trainer; a repeated picture is not stored twice | phase4 |
+| 10 | **"Delete old data" and Restore answered "Server error" on the Workers Free plan** (reported 14 November, after go-live). A request may make 50 outgoing calls there; these made about 90 to 110 even on a small database, and more with every person deleted (also in v3.35) | Backups, the safety copy and the delete preview read all collections in one call per 5,000 records (`records_page`); deletes send their ids in the body, 5,000 per call (`records_delete`); the live-update counters go up in one call (`next_seq_many`); renewals and account clean-up read once, not once per person. Measured on PostgreSQL with 120 people: preview 5, delete 31, restore 18 calls. Needs `schema.sql` (until then the old, slower way is used) | phase4: fits 50 calls, however many people; `npm run drill:local` scenario P |
 
 Still open, and why: `package-lock.json` (M14: needs `npm install` on a machine with network access); `connect-src https:` (L8: needs the list of camera-bridge hosts each office uses); the bootstrap e-mail rule (L1: safe while Supabase sign-ups are off, DEPLOY.md 2); usage counts and the retention job read every session (L16: light, field-limited reads; worth moving into SQL past roughly 50,000 sessions); code density (L18: a formatting-only change, to be made alone). Signature pictures inside *session documents* signed "with picture" by office staff are still drawn by the office browser only; trainers' and candidates' pages never show them.
 

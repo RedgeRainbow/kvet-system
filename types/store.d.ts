@@ -42,6 +42,8 @@ export interface Store {
   lockOk(k: string): Promise<any>;
   lockSweep?(before: string): Promise<number>;
   scan(col: string, fn: (rows: { id: string; data: any }[]) => any, size?: number): Promise<void>;
+  seqMany(names: string[]): Promise<void>;
+  scanAll(cols: string[], fn: (rows: { col: string; id: string; data: any }[]) => any, size?: number): Promise<void>;
   restoreBegin(): Promise<any>;
   restoreAdd(rows: { col: string; id: string; data: any }[]): Promise<any>;
   restoreApply(cols: string[], ctrs: any[]): Promise<any>;

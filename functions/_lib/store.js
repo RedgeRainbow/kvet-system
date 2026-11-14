@@ -63,11 +63,16 @@ export function applyOps(doc, set, unset) {
 const canon = v => (Array.isArray(v) ? '[' + v.map(canon).join(',') + ']' : v && typeof v === 'object' ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' : JSON.stringify(v ?? null));
 const hash32 = s => { let a = 0x811c9dc5, b = 0x1b873593; for (let i = 0; i < s.length; i++) { const ch = s.charCodeAt(i); a = Math.imul(a ^ ch, 0x01000193); b = Math.imul(b + ch, 0x85ebca6b) ^ (b >>> 13); } return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0'); };
 
+/** rows per call of scanAll: 250,000 records fit the 50 calls of the Workers Free plan */
+export const SCAN_ALL = 5000;
 export function supabaseStore(env) {
   /** @type {any} */ let rpcIn = null;                  // records_in available? (null = not tried yet)
   /** @type {any} */ let rpcPatch = null;               // patch_record available?
   /** @type {any} */ let rpcPatchN = null;              // patch_records available?
   /** @type {any} */ let rpcAudit = null;               // audit_page available?
+  /** @type {any} */ let rpcPage = null;                // records_page available?
+  /** @type {any} */ let rpcDel = null;                 // records_delete available?
+  /** @type {any} */ let rpcSeqs = null;                // next_seq_many available?
   const K = env.SUPABASE_SERVICE_KEY;
   /** @type {Record<string, string>} */
   const A = K.startsWith('sb_') ? { apikey: K } : { apikey: K, authorization: 'Bearer ' + K };
@@ -177,13 +182,21 @@ export function supabaseStore(env) {
     /* Deletes many ids with one request per 40 ids (the Worker has a small sub-request budget). */
     async delMany(col, ids) {
       /* Few, large requests (a Worker has a small sub-request budget): as many ids per call as a safe URL length allows. */
-      ids = [...ids]; let batch = [], len = 0;
+      ids = [...ids]; let batch = [], len = 0; if (!ids.length) return;
+      // records_delete (schema.sql v3.36): the ids go in the body, 5,000 per call. Until it exists: in the address, ~200 per call
+      if (rpcDel !== false) { try { for (let i = 0; i < ids.length; i += 5000) { await call('rpc/records_delete', { method: 'POST', body: JSON.stringify({ p_col: col, p_ids: ids.slice(i, i + 5000).map(String) }) }); rpcDel = true; } return; } catch (/** @type {any} */ e) { if (rpcDel || !(e.status === 404 || /PGRST202/.test(e.body || ''))) throw e; rpcDel = false; } }
       const flush = async () => { if (!batch.length) return; const list = '(' + batch.join(',') + ')'; batch = []; len = 0; await call(`records?col=eq.${col}&id=in.${q(list)}`, { method: 'DELETE' }); };
       for (const x of ids) { const v = '"' + String(x).replace(/([\\"])/g, '\\$1') + '"'; if (len + q(v).length + 3 > 6000) await flush(); batch.push(v); len += q(v).length + 3; }
       await flush();
     },
     delCol: col => call(`records?col=eq.${col}`, { method: 'DELETE' }),
     seq: n => call('rpc/next_seq', { method: 'POST', body: JSON.stringify({ n }) }),
+    /* several counters +1 in one call (next_seq_many, schema.sql v3.36); one call each until that has run */
+    async seqMany(names) {
+      names = [...new Set(names)]; if (!names.length) return;
+      if (rpcSeqs !== false) { try { await call('rpc/next_seq_many', { method: 'POST', body: JSON.stringify({ names }) }); rpcSeqs = true; return; } catch (/** @type {any} */ e) { if (rpcSeqs || !(e.status === 404 || /PGRST202/.test(e.body || ''))) throw e; rpcSeqs = false; } }
+      await Promise.all(names.map(n => this.seq(n)));
+    },
     async peek(n) { return (await call(`counters?name=eq.${q(n)}&select=val`))[0]?.val ?? 0; },
     bump: (n, v) => call('rpc/bump_seq', { method: 'POST', body: JSON.stringify({ n, v }) }),
     counters: () => call('counters?select=name,val'),
@@ -212,6 +225,20 @@ export function supabaseStore(env) {
         if (rows.length) await fn(rows.map(r => ({ id: r.id, data: r.data })));
         if (rows.length < size) return; last = rows[rows.length - 1].id;
       }
+    },
+    /* Several collections, page by page, in as few calls as possible: fn(rows of { col, id, data }), ordered by collection.
+       One call per SCAN_ALL rows with records_page (schema.sql v3.36); one call per collection (scan) until that has run. */
+    async scanAll(cols, fn, size = SCAN_ALL) {
+      if (rpcPage !== false) {
+        try {
+          for (let ac = null, ai = null; ;) {
+            const rows = await call('rpc/records_page', { method: 'POST', body: JSON.stringify({ cols, after_col: ac, after_id: ai, n: size }) }); rpcPage = true;
+            if (rows.length) await fn(rows);
+            if (rows.length < size) return; ac = rows[rows.length - 1].col; ai = rows[rows.length - 1].id;
+          }
+        } catch (/** @type {any} */ e) { if (rpcPage || !(e.status === 404 || /PGRST202/.test(e.body || ''))) throw e; rpcPage = false; }
+      }
+      for (const col of cols) await this.scan(col, rows => fn(rows.map(r => ({ col, id: r.id, data: r.data }))));
     },
     /* all-or-nothing restore: stage the rows (in as many calls as it takes), then swap them in with ONE database transaction */
     restoreBegin: () => call('records_restore?col=neq.__none__', { method: 'DELETE' }),
@@ -262,6 +289,7 @@ export function memoryStore() {
     delMany: async (c, ids) => { for (const id of ids) col(c).delete(id); },
     delCol: async c => { col(c).clear(); },
     seq: async n => { const v = (counters.get(n) || 0) + 1; counters.set(n, v); return v; },
+    seqMany: async names => { for (const n of new Set(names)) counters.set(n, (counters.get(n) || 0) + 1); },
     peek: async n => counters.get(n) || 0,
     bump: async (n, v) => { if ((counters.get(n) || 0) < v) counters.set(n, v); return counters.get(n); },
     counters: async () => [...counters].map(([name, val]) => ({ name, val })),
@@ -272,6 +300,7 @@ export function memoryStore() {
     lockFail: async (k, max, secs) => { const l = locks.get(k) || { n: 0, until: 0, at: 0 }; if (Date.now() - l.at > secs * 1000) l.n = 0; l.n++; l.at = Date.now(); if (l.n >= max) { l.n = 0; l.until = Date.now() + secs * 1000; } locks.set(k, l); return l.until > Date.now() ? l.until : 0; },
     lockOk: async k => { locks.delete(k); },
     lockSweep: async before => { let n = 0; for (const [k, l] of locks) if (Math.max(l.at || 0, l.until || 0) < Date.parse(before)) { locks.delete(k); n++; } return n; },
+    scanAll: async (cols, fn, size = SCAN_ALL) => { const all = [...cols].sort().flatMap(c => [...col(c)].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([id, d]) => ({ col: c, id, data: cp(d) }))); for (let i = 0; i < all.length; i += size) await fn(all.slice(i, i + size)); },
     scan: async (c, fn, size = 1000) => { const all = [...col(c)].sort((a, b) => (a[0] < b[0] ? -1 : 1)); for (let i = 0; i < all.length; i += size) await fn(all.slice(i, i + size).map(([id, data]) => ({ id, data: cp(data) }))); },
     restoreBegin: async () => { stage.length = 0; },
     restoreAdd: async rows => { for (const x of rows) { if (x.col === 'audit') throw new Error('audit cannot be restored'); stage.push({ col: x.col, id: x.id, data: cp(repairRecord(x.col, x.id, x.data)) }); } },
