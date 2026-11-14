@@ -2,16 +2,16 @@ import { mountPortal, topbar } from '../portal.js';
 import { live } from '../live.js';
 import { api } from '../api.js';
 import * as S from '../shared.js';
-import { $, $$, esc, t, fail, toast, openModal, badge, empty, busy, download, norm, confirmDlg, paged, onPage } from '../ui.js';
+import { $, $$, esc, t, fail, toast, openModal, badge, empty, busy, download, norm, confirmDlg, paged, onPage, showPdf, dataUrl } from '../ui.js';
 import { certHtml, DOC_CSS, printHtml, htmlToPdf, certFile } from '../cert.js';
 import { writeXlsx, readXlsx } from '../xlsx.js';
 import { analyticsView } from '../analytics.js';
 import { personForm, bindPerson } from '../person.js';
+const scaled = (html, w) => `<div style="width:${w}px;max-width:100%;overflow:hidden"><div style="width:794px;transform-origin:0 0;transform:scale(${w / 794});height:${Math.round(1123 * w / 794)}px"><style>${DOC_CSS}</style>${html}</div></div>`;
 import { icon } from '../icons.js';
 
 const K = 'company';
 /** @type {any} */ let gotoH = null;
-const scaled = (html, w) => `<div style="width:${w}px;max-width:100%;overflow:hidden"><div style="width:794px;transform-origin:0 0;transform:scale(${w / 794});height:${Math.round(1123 * w / 794)}px"><style>${DOC_CSS}</style>${html}</div></div>`;
 const rqBadge = s => badge({ new: 'PENDING', planned: 'info', done: 'PASS', rejected: 'FAIL' }[s] || '', t('rq_' + s));
 
 mountPortal({ kind: K, titleKey: 'portalCompany', bodyClass: 'company', async boot({ app, rerender }) {
@@ -186,12 +186,18 @@ mountPortal({ kind: K, titleKey: 'portalCompany', bodyClass: 'company', async bo
     $$('tr[data-person]').forEach(r => (r.onclick = () => personDlg(r.dataset.person)));
     $('#ncand')?.addEventListener('click', candDlg); $('#cimp')?.addEventListener('click', candImport); $$('[data-cx]').forEach(b => (b.onclick = async () => { if (!await confirmDlg(t('candCancelConfirm'))) return; try { await api('/portal/company/candidate/cancel', { kind: K, body: { id: b.dataset.cx } }); await loadCands(); draw(); } catch (/** @type {any} */ e) { fail(e); } }));
     if (view === 'analytics') analyticsView($('#anv'), { base: '/portal/company/analytics', kind: K, title: t('navAnalytics') });
-    $$('[data-v],[data-pdf]').forEach(b => (b.onclick = async () => {
-      let c; try { c = (await api('/portal/company/cert?no=' + encodeURIComponent(b.dataset.v || b.dataset.pdf), { kind: K })).cert; } catch (/** @type {any} */ e) { return fail(e); }   // full certificate on demand
-      const html = certHtml(c, H.assets, H.info);
-      if (b.dataset.pdf) return busy(b, async () => { try { download(await htmlToPdf(html), certFile(c)); } catch (/** @type {any} */ e) { fail(e); } });
-      openModal({ title: c.no, wide: true, html: scaled(html, Math.min(640, innerWidth - 70)), buttons: [{ label: '🖨 ' + t('print'), cls: 'ghost', fn: async () => { await printHtml(html, c.no); return false; } }, { label: '⬇ PDF', fn: async () => { try { download(await htmlToPdf(html), certFile(c)); } catch (/** @type {any} */ e) { fail(e); } return false; } }, { label: t('close'), cls: 'ghost', id: 'x' }] });
-    }));
+    /* Settings -> certificates drawn on the server. On: this page shows the server's PDF and never receives the signature
+       picture. Off (Workers Free plan): the page draws the certificate and asks for the picture with its sign-in. */
+    $$('[data-v],[data-pdf]').forEach(b => (b.onclick = () => busy(b, async () => {
+      const no = b.dataset.v || b.dataset.pdf, q = '?no=' + encodeURIComponent(no), name = no.replace(/[^A-Za-z0-9]+/g, '-') + '.pdf';
+      try {
+        if (H.certPdf) { const blob = await api('/portal/company/cert.pdf' + q, { kind: K, blob: true }); return b.dataset.pdf ? download(blob, name) : showPdf({ title: no, blob, name }); }
+        const c = (await api('/portal/company/cert' + q, { kind: K })).cert;                                   // full certificate on demand
+        const html = certHtml(c.sigPic ? { ...c, sigData: await dataUrl(await api('/portal/company/cert/sig' + q, { kind: K, blob: true })) } : c, H.assets, H.info);
+        if (b.dataset.pdf) return download(await htmlToPdf(html), certFile(c));
+        openModal({ title: c.no, wide: true, html: scaled(html, Math.min(640, innerWidth - 70)), buttons: [{ label: '🖨 ' + t('print'), cls: 'ghost', fn: async () => { await printHtml(html, c.no); return false; } }, { label: '⬇ PDF', fn: async () => { try { download(await htmlToPdf(html), certFile(c)); } catch (/** @type {any} */ e) { fail(e); } return false; } }, { label: t('close'), cls: 'ghost', id: 'x' }] });
+      } catch (/** @type {any} */ e) { fail(e); }
+    })));
   }
   draw();
   live({ kind: K, path: () => '/portal/company/rev', every: 20000, onChange: () => (view === 'analytics' ? null : rerender()) });

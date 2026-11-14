@@ -85,6 +85,71 @@ R2 is connected through the `BUCKET` binding, so no R2 keys are needed.
 It runs every day at 04:17 Baku time. Test it: `curl -H "x-cron-key: <CRON_SECRET>" https://kvet-cron.<account>.workers.dev/` (opening `…/?key=<CRON_SECRET>` in a browser still works, but leaves the secret in the browser history).
 Without the scheduler a backup is still made when an admin opens the panel (at most once a day), but reminders and retention do not run.
 
+## 3c. Backups and disaster recovery (v3.36)
+
+**What a backup is.** One file per night in the R2 bucket (`backups/…​.kvb`, 90 kept): every record, the audit trail, the
+user list with roles, the counters, and the small pictures (logo, accreditation logos, signatures, stamp). It is written
+as a stream, so its size is not limited by the worker's memory, and it is **encrypted** (AES-256-GCM). Not in it: session
+photos, presentations and question pictures (they stay in R2) and staff passwords (they live in Supabase Auth).
+
+**The key.** By default the key is derived from `TOKEN_SECRET`. Better: set a separate secret and keep a copy of it
+*outside Cloudflare* (a password manager, a sealed envelope) - a backup without its key cannot be read by anybody:
+
+    npx wrangler pages secret put BACKUP_KEY --project-name kvet-certificates     # any long random text; then redeploy
+
+Files made before the key changed need the old key: keep old values. System -> Backups -> "✓ Check" says whether the
+current key opens a file.
+
+**Every night** the scheduler writes the backup, reads it back, decrypts it and counts its records. If that fails,
+superadmins get a notification and the audit trail gets a `backup.bad` row.
+
+**Keep a copy elsewhere.** System -> Backups -> ⬇ downloads the encrypted file. "📄 Readable copy" downloads it decrypted
+(plain text, one record per line) - that download is written to the audit trail; treat the file like the database itself.
+
+**To restore** (superadmin): System -> Backups -> Restore, or "Upload a backup" first when the file is not in the bucket
+any more. The file is checked completely before anything changes, a safety backup of the current state is made first,
+and the swap is one database transaction. Afterwards: the audit trail is kept as it is (its rows are added back only
+where they are missing - a new, empty database gets the whole trail); users of the backup who no longer exist in
+Supabase Auth must be re-invited.
+
+**After losing the whole Supabase project:** create a project, run `schema.sql`, set the Pages variables to it, sign in
+with the `BOOTSTRAP_ADMIN_EMAIL` account, upload the backup, restore.
+
+**Drills.** Two scripts prove the path end to end by deleting every record and comparing checksums before and after:
+
+    # on any computer with PostgreSQL installed: the real storage code against a real database, nothing of yours touched
+    npm run drill:local -- --psql "psql -h localhost -U postgres -d kvet_drill" --people 500
+    # on a STAGING copy (a second Pages project + a second Supabase project); refuses the production project
+    npm run drill:staging -- --api https://kvet-staging.pages.dev --email you@kvet.az --password '…' \
+         --supabase-url https://<staging-ref>.supabase.co --service-key '<staging service key>' --confirm <staging-ref>
+
+Run the staging drill once now and after every change to `schema.sql`; write the date down.
+
+## 3d. Certificates for candidates and companies (v3.36)
+
+**The switch:** Settings -> Two-factor sign-in card -> "Draw certificates on the server" (superadmin; **off** after the
+upgrade; every change is written to the audit trail).
+
+| | Off (Workers Free plan) | On (Workers Paid plan) |
+|---|---|---|
+| Who draws a candidate's / company's certificate | their browser, as before v3.36 | the server: a finished PDF (`certpdf.js`) |
+| Signature picture | sent only to the signed-in owner of that certificate (`GET /api/portal/…/cert/sig`) | never sent to a portal |
+| Processor time per certificate | none on the server | 50-150 ms for the first drawing, then served from R2 |
+
+Turn it on the day you move to the Paid plan (Cloudflare -> Workers & Pages -> Plans), open one certificate as a
+candidate and one as a company, and turn it off again if you go back to Free. Nothing else has to be changed either way.
+On the Free plan with the switch on, requests may be cut off by the 10 ms limit (error 1102) and certificates will not open.
+
+In both positions:
+
+- Signature and stamp pictures are **not public files any more**. `/api/asset/<name>` serves only the current logo and
+  accreditation logos; every other picture needs the office pass that signed-in staff pages receive (it changes daily).
+  Addresses that earlier versions handed to portals stopped working with this deploy - nothing to rotate.
+- (On) A certificate is drawn on its first request and kept in R2 (`certpdf/`); it is drawn again only after it changes
+  (signature, correction, logo). Prepared pictures are kept in `pdfimg/`. Both folders can be emptied at any time.
+- The office preview and print still use the browser version (`public/js/cert.js`). **A change to the certificate's
+  layout must be made in both files**; `test/phase4.test.mjs` checks that the words agree.
+
 ## 4. First run
 Admin -> Settings: company info, logo, stamp, accreditation logos, certificate numbering (default `CRT/26/0001`, restarts every year).
 Certificate signatures are personal: each admin/superadmin opens **My account** (top right), fills in **name and title**, and optionally uploads their **signature image**. Only admin and superadmin can sign certificates (electronically or with their image); editors, readers, trainers and trainees cannot.
@@ -163,7 +228,7 @@ It has admin rights plus user management, cannot delete or restore backups, and 
   The app itself counts every attempt first and atomically in the database: 8 attempts per account and 40 per IP address, then 15 minutes locked.
 - Security headers (Content-Security-Policy, HSTS, no framing) are set in `public/_headers`. If you add a custom domain with sub-domains you do not control over HTTPS, remove `includeSubDomains` from HSTS.
 - Two-factor sign-in for staff: Settings -> Two-factor sign-in (optional / admins / all staff). Each person sets it up from the account button (top right). A superadmin can reset it in Users (lost phone).
-- Backups contain every ID/FIN and the password hashes: only a superadmin can download them. Camera passwords are stored encrypted.
+- Backups contain every ID/FIN and the password hashes: they are encrypted in the bucket, and only a superadmin can download them (section 3c). Camera passwords are stored encrypted.
 - Trainers only see people from their own sessions; anyone else is added by exact learner number. A trainer who registers an existing ID/FIN only learns "already registered".
 - Custom domain: Pages project -> Custom domains. QR codes use the domain the certificate was opened on, so open certificates on the final domain.
 

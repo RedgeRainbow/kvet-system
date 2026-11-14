@@ -4,7 +4,7 @@
    - tbtDlg: the toolbox talk form
    - sessionZip: every document of a session as PDFs in one ZIP */
 import { $, $$, esc, t, openModal, download, fail, badge, toast } from './ui.js';
-import { DOC_CSS, printHtml, htmlToPdf, attendanceHtml, practicalHtml, esignLine } from './cert.js';
+import { DOC_CSS, printHtml, htmlToPdf, attendanceHtml, practicalHtml, esignLine, sigSrc } from './cert.js';
 import * as F from './forms.js';
 import * as S from './shared.js';
 
@@ -62,7 +62,7 @@ export function tbtDlg({ session, blank, tbt = /** @type {any} */ ({}), rows, tr
 /* The approval countersignature (approver / superadmin), printed at the end of a document. */
 export function withAppr(html, sg) {
   if (!sg) return html;
-  const blk = `<div class="esb" style="margin-top:10px;border-color:#1f6f43;background:#f2faf5">${sg.mode === 'image' && sg.img ? `<img src="/api/asset/${esc(sg.img)}" alt="" style="height:42px;display:block;margin-bottom:4px">` : ''}✔ <b>Təsdiq edilib / Approved</b> — ${esignLine(sg)}</div>`;
+  const blk = `<div class="esb" style="margin-top:10px;border-color:#1f6f43;background:#f2faf5">${sg.mode === 'image' && sg.img ? `<img src="${esc(sigSrc(sg.img))}" alt="" style="height:42px;display:block;margin-bottom:4px">` : ''}✔ <b>Təsdiq edilib / Approved</b> — ${esignLine(sg)}</div>`;
   const i = html.lastIndexOf('</div>'); return i < 0 ? html + blk : html.slice(0, i) + blk + html.slice(i);
 }
 /* Every document of a session, as { key, doc, tid, name, file, html() } — used for the ZIP, previews and approval signing.

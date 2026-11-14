@@ -273,11 +273,19 @@ const doneOut = x => ({ done: true, status: x.status, ...(x.status === 'graded' 
 /* question pictures: images only (PNG / JPEG / WebP, checked by their first bytes), max 3 MB; the browser shrinks them first */
 /** @type {[string, number[], string][]} */
 const IMG = [['png', [0x89, 0x50, 0x4e, 0x47], 'image/png'], ['jpg', [0xff, 0xd8, 0xff], 'image/jpeg'], ['webp', [0x52, 0x49, 0x46, 0x46], 'image/webp']];
+export const QIMG_PER_DAY = 100;
 export async function saveQImage(c) {
   const buf = await c.req.arrayBuffer(); need(buf.byteLength > 100 && buf.byteLength <= 3e6, 'badFile');
   const head = new Uint8Array(buf.slice(0, 12)), kind = IMG.find(([, sig]) => sig.every((v, i) => head[i] === v)); need(kind, 'badFile');
   if (kind[0] === 'webp') need(String.fromCharCode(...head.slice(8, 12)) === 'WEBP', 'badFile');
   const key = [...new Uint8Array(await crypto.subtle.digest('SHA-256', buf))].slice(0, 8).map(x => x.toString(16).padStart(2, '0')).join('') + '.' + kind[0];
+  if (await c.B.head('qimg/' + key)) return { img: key };                          // the same picture again: nothing new is stored
+  // a trainer's account may add QIMG_PER_DAY new pictures a day (v3.36): storage cannot be filled from one signed-in account
+  if (c.me && c.user?.kind !== 'staff') {
+    const tr = await c.D.get('trainers', c.me.id), day = c.today(), used = tr?.imgq?.day === day ? Number(tr.imgq.n) || 0 : 0;
+    if (!tr || used >= QIMG_PER_DAY) { await audit(c, 'test.image.limit', `${c.me.name || ''} ${c.me.surname || ''} · ${used}`).catch(() => {}); throw new H(429, 'imgLimit'); }
+    tr.imgq = { day, n: used + 1 }; await c.D.put('trainers', [{ id: tr.id, data: tr }]);
+  }
   await c.B.put('qimg/' + key, buf, { httpMetadata: { contentType: kind[2] } });
   return { img: key };
 }

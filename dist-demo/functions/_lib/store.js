@@ -59,10 +59,15 @@ export function applyOps(doc, set, unset) {
   return d;
 }
 
+/* for the in-memory fingerprint: the same text for the same record whatever the order of its keys */
+const canon = v => (Array.isArray(v) ? '[' + v.map(canon).join(',') + ']' : v && typeof v === 'object' ? '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canon(v[k])).join(',') + '}' : JSON.stringify(v ?? null));
+const hash32 = s => { let a = 0x811c9dc5, b = 0x1b873593; for (let i = 0; i < s.length; i++) { const ch = s.charCodeAt(i); a = Math.imul(a ^ ch, 0x01000193); b = Math.imul(b + ch, 0x85ebca6b) ^ (b >>> 13); } return (a >>> 0).toString(16).padStart(8, '0') + (b >>> 0).toString(16).padStart(8, '0'); };
+
 export function supabaseStore(env) {
   /** @type {any} */ let rpcIn = null;                  // records_in available? (null = not tried yet)
   /** @type {any} */ let rpcPatch = null;               // patch_record available?
   /** @type {any} */ let rpcPatchN = null;              // patch_records available?
+  /** @type {any} */ let rpcAudit = null;               // audit_page available?
   const K = env.SUPABASE_SERVICE_KEY;
   /** @type {Record<string, string>} */
   const A = K.startsWith('sb_') ? { apikey: K } : { apikey: K, authorization: 'Bearer ' + K };
@@ -199,12 +204,33 @@ export function supabaseStore(env) {
     lockOk: k => call('rpc/login_ok', { method: 'POST', body: JSON.stringify({ k }) }),
     /* removes sign-in counters not touched since `before` (ISO time); returns how many */
     lockSweep: async before => Number(await call('rpc/login_sweep', { method: 'POST', body: JSON.stringify({ before }) })) || 0,
-    /* all-or-nothing restore: stage the rows, then swap them in with one database transaction */
-    async restore(cols, data, ctrs) {
-      await call('records_restore?col=neq.__none__', { method: 'DELETE' });
-      for (const col of cols) { const rows = (data[col] || []).map(x => ({ col, id: x.id, data: repairRecord(col, x.id, x.data) })); for (let i = 0; i < rows.length; i += 500) await call('records_restore', { method: 'POST', headers: { prefer: 'return=minimal' }, body: JSON.stringify(rows.slice(i, i + 500)) }); }
-      return call('rpc/apply_restore', { method: 'POST', body: JSON.stringify({ cols, ctrs: ctrs || [] }) });
+    /* A whole collection, a page at a time in the order of the ids (keyset paging: each page starts after the last id of
+       the one before, so it stays fast however large the collection is). The records come as they are stored. */
+    async scan(col, fn, size = PAGE) {
+      for (let last = null; ;) {
+        const rows = await call(`records?col=eq.${col}${last === null ? '' : `&id=gt.${q(last)}`}&select=id,data&order=id&limit=${size}`);
+        if (rows.length) await fn(rows.map(r => ({ id: r.id, data: r.data })));
+        if (rows.length < size) return; last = rows[rows.length - 1].id;
+      }
     },
+    /* all-or-nothing restore: stage the rows (in as many calls as it takes), then swap them in with ONE database transaction */
+    restoreBegin: () => call('records_restore?col=neq.__none__', { method: 'DELETE' }),
+    async restoreAdd(rows) { for (let i = 0; i < rows.length; i += 500) await call('records_restore?on_conflict=col,id', { method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows.slice(i, i + 500).map(x => ({ col: x.col, id: x.id, data: repairRecord(x.col, x.id, x.data) }))) }); },
+    restoreApply: (cols, ctrs) => call('rpc/apply_restore', { method: 'POST', body: JSON.stringify({ cols, ctrs: ctrs || [] }) }),
+    async restore(cols, data, ctrs) {
+      await this.restoreBegin();
+      for (const col of cols) await this.restoreAdd((data[col] || []).map(x => ({ col, id: x.id, data: x.data })));
+      return this.restoreApply(cols, ctrs);
+    },
+    /* One page of the audit trail, filtered and counted in the database (schema.sql: audit_page). null = the function is
+       not installed yet: the caller then filters in memory, as before. */
+    async auditPage(spec) {
+      if (rpcAudit === false) return null;
+      try { const r = await call('rpc/audit_page', { method: 'POST', body: JSON.stringify({ p: spec }) }); rpcAudit = true; return r; }
+      catch (/** @type {any} */ e) { if (!(e.status === 404 || /PGRST202/.test(e.body || ''))) throw e; rpcAudit = false; return null; }
+    },
+    /* one line per collection: how many records, and a checksum over all of them (to compare before and after a restore) */
+    fingerprint: () => call('rpc/records_fingerprint', { method: 'POST', body: '{}' }),
     setCounters: rows => call('counters?on_conflict=name', { method: 'POST', headers: { prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify(rows) }),
   };
 }
@@ -216,6 +242,8 @@ export function memoryStore() {
   // the same rules as the database constraints (shapes.js): a route writing a malformed record fails here in the tests
   const chk = (c, rs) => { for (const r of rs) { const e = shapeError(c, r.id, r.data); if (e) throw new H(422, 'badRecord', { detail: `${c}/${r.id}: ${e}` }); } };
   const patch1 = async (c, id, base, set, unset) => { const next = col(c).has(id) ? applyOps(col(c).get(id), set, unset) : cp(base); chk(c, [{ id, data: next }]); col(c).set(id, next); };
+  /** @type {{col: string, id: string, data: any}[]} */ const stage = [];
+  const applyStage = (cs, ctrs) => { if (cs.includes('audit')) throw new Error('audit cannot be restored'); for (const c of cs) col(c).clear(); for (const x of stage) if (cs.includes(x.col)) col(x.col).set(x.id, x.data); const n = stage.length; stage.length = 0; for (const r of ctrs || []) counters.set(r.name, Math.max(counters.get(r.name) || 0, r.val)); return n; };
   /** @param {(id: any, d?: any) => boolean} [f] */
   const rows = (c, f = () => true) => [...col(c)].filter(([id, d]) => f(id, d)).sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([id, data]) => ({ id, data: withId(c, id, cp(data)) }));
   return {
@@ -244,17 +272,37 @@ export function memoryStore() {
     lockFail: async (k, max, secs) => { const l = locks.get(k) || { n: 0, until: 0, at: 0 }; if (Date.now() - l.at > secs * 1000) l.n = 0; l.n++; l.at = Date.now(); if (l.n >= max) { l.n = 0; l.until = Date.now() + secs * 1000; } locks.set(k, l); return l.until > Date.now() ? l.until : 0; },
     lockOk: async k => { locks.delete(k); },
     lockSweep: async before => { let n = 0; for (const [k, l] of locks) if (Math.max(l.at || 0, l.until || 0) < Date.parse(before)) { locks.delete(k); n++; } return n; },
-    restore: async (cs, data, ctrs) => { if (cs.includes('audit')) throw new Error('audit cannot be restored'); for (const c of cs) { col(c).clear(); for (const x of data[c] || []) col(c).set(x.id, cp(repairRecord(c, x.id, x.data))); } for (const r of ctrs || []) counters.set(r.name, Math.max(counters.get(r.name) || 0, r.val)); },
+    scan: async (c, fn, size = 1000) => { const all = [...col(c)].sort((a, b) => (a[0] < b[0] ? -1 : 1)); for (let i = 0; i < all.length; i += size) await fn(all.slice(i, i + size).map(([id, data]) => ({ id, data: cp(data) }))); },
+    restoreBegin: async () => { stage.length = 0; },
+    restoreAdd: async rows => { for (const x of rows) { if (x.col === 'audit') throw new Error('audit cannot be restored'); stage.push({ col: x.col, id: x.id, data: cp(repairRecord(x.col, x.id, x.data)) }); } },
+    restoreApply: async (cs, ctrs) => applyStage(cs, ctrs),
+    restore: async (cs, data, ctrs) => { stage.length = 0; for (const c of cs) for (const x of data[c] || []) stage.push({ col: c, id: x.id, data: cp(repairRecord(c, x.id, x.data)) }); return applyStage(cs, ctrs); },
+    fingerprint: async () => [...cols].filter(([, m]) => m.size).map(([c, m]) => ({ col: c, n: m.size, h: hash32([...m].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([id, d]) => id + ':' + canon(d)).join(',')) })).sort((a, b) => (a.col < b.col ? -1 : 1)),
     _dump: () => Object.fromEntries([...cols].map(([c, m]) => [c, Object.fromEntries(m)])),
   };
 }
 
 export function memoryBucket() {
   const m = new Map();
-  const wrap = o => o && { body: new Blob([o.buf]).stream(), arrayBuffer: async () => o.buf, json: async () => JSON.parse(new TextDecoder().decode(o.buf)), httpMetadata: o.meta, size: o.buf.byteLength };
+  const wrap = o => o && { body: new Blob([o.buf]).stream(), arrayBuffer: async () => o.buf, json: async () => JSON.parse(new TextDecoder().decode(o.buf)), httpMetadata: o.meta, customMetadata: o.custom, size: o.buf.byteLength };
   return {
-    async put(k, v, opts) { const buf = typeof v === 'string' ? new TextEncoder().encode(v).buffer : v instanceof ArrayBuffer ? v : new Uint8Array(v).buffer; m.set(k, { buf, meta: opts?.httpMetadata, at: new Date() }); },
+    async put(k, v, opts) { const buf = typeof v === 'string' ? new TextEncoder().encode(v).buffer : v instanceof ArrayBuffer ? v : new Uint8Array(v).buffer; m.set(k, { buf, meta: opts?.httpMetadata, custom: opts?.customMetadata, at: new Date() }); },
     async get(k) { return wrap(m.get(k)); },
+    async head(k) { const o = m.get(k); return o ? { key: k, size: o.buf.byteLength, httpMetadata: o.meta } : null; },
+    /* like R2: every part but the last must have the same size, and at least 5 MiB */
+    async createMultipartUpload(k, opts) {
+      const parts = new Map();
+      return {
+        async uploadPart(n, v) { const u = v instanceof Uint8Array ? v.slice() : new Uint8Array(v); parts.set(n, u); return { partNumber: n, etag: 'e' + n + '-' + u.length }; },
+        async complete(list) {
+          const us = list.map(p => parts.get(p.partNumber)); if (us.some(u => !u)) throw new Error('multipart: unknown part');
+          if (us.slice(0, -1).some(u => u.length !== us[0].length || u.length < (5 << 20))) throw new Error('multipart: parts must have the same size (5 MiB or more), except the last');
+          const out = new Uint8Array(us.reduce((s, u) => s + u.length, 0)); let o = 0; for (const u of us) { out.set(u, o); o += u.length; }
+          m.set(k, { buf: out.buffer, meta: opts?.httpMetadata, at: new Date() });
+        },
+        async abort() { parts.clear(); },
+      };
+    },
     async delete(k) { m.delete(k); },
     async list({ prefix = '' } = {}) { return { objects: [...m].filter(([k]) => k.startsWith(prefix)).map(([key, o]) => ({ key, size: o.buf.byteLength, uploaded: o.at })) }; },
     _keys: () => [...m.keys()],

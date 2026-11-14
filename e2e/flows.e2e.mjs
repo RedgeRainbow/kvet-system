@@ -220,3 +220,38 @@ test('"choose your own password" step, then sign-out ends the session on the ser
     assert.deepEqual(errors, []);
   } finally { await api('/settings/save', { forcePw: false }); await close(); }
 });
+
+test('company portal, server certificates OFF (Free plan): the page draws the certificate itself, with the signature picture fetched through the sign-in (v3.36)', async () => {
+  // sign the certificate with a picture (a 1x1 PNG is enough here)
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  await fetch(BASE + '/api/staff/signature', { method: 'POST', headers: { authorization: 'Bearer ' + T, 'content-type': 'image/png' }, body: png });
+  await api('/cert/sign', { nos: [D.cert.no], mode: 'image' });
+  const { p, errors, close } = await page(), cr = D.company.creds, asked = [];
+  p.on('request', r => { if (/\/api\/(asset\/[a-f0-9]{16}\.png|portal\/company\/cert)/.test(r.url())) asked.push(new URL(r.url()).pathname); });
+  await signIn(p, '/company', cr.login, cr.password);
+  await p.click(`[data-v="${D.cert.no}"]`);
+  await p.waitForSelector('dialog .cert .sig .sl img');
+  assert.match(await p.getAttribute('dialog .cert .sig .sl img', 'src'), /^data:image\/png;base64,/, 'the picture came through the signed-in request, not from a public address');
+  assert.ok(asked.includes('/api/portal/company/cert/sig') && !asked.includes('/api/portal/company/cert.pdf'));
+  assert.deepEqual(asked.filter(u => u.startsWith('/api/asset/') && !u.includes(D.logoKey || '\0')), [], 'no signature picture was asked for by address');
+  assert.deepEqual(errors, [], errors.join('\n'));
+  await close();
+});
+
+test('company portal, server certificates ON: the certificate opens as a PDF drawn by the server; no signature picture is ever requested (v3.36)', async () => {
+  await api('/settings/save', { serverCerts: true });                                   // the switch: Settings -> certificates drawn on the server
+  const { p, errors, close } = await page(), cr = D.company.creds, asked = [];
+  p.on('request', r => { if (/\/api\/asset\/[a-f0-9]{16}\.png/.test(r.url())) asked.push(r.url()); });
+  await signIn(p, '/company', cr.login, cr.password);
+  const pdf = p.waitForResponse(r => r.url().includes('/api/portal/company/cert.pdf'));
+  await p.click(`[data-v="${D.cert.no}"]`);
+  const res = await pdf; assert.equal(res.status(), 200); assert.equal(res.headers()['content-type'], 'application/pdf');
+  await p.waitForSelector('dialog iframe[src^="blob:"]');
+  // what the page was given is the PDF itself
+  const shown = await p.evaluate(async no => { const { api } = await import('/js/api.js'), b = await api('/portal/company/cert.pdf?no=' + encodeURIComponent(no), { kind: 'company', blob: true }); return [await b.slice(0, 5).text(), b.size]; }, D.cert.no);
+  assert.equal(shown[0], '%PDF-'); assert.ok(shown[1] > 20000, 'a PDF of ' + shown[1] + ' bytes');
+  assert.ok(await p.$('dialog a[download$=".pdf"]'), 'a download link beside the preview');
+  assert.deepEqual(asked.filter(u => !u.includes(D.logoKey || '\0')), [], 'no signature / stamp picture was asked for');
+  assert.deepEqual(errors, [], errors.join('\n'));
+  await close();
+});

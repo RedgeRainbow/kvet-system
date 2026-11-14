@@ -9,7 +9,9 @@
     "typecheck": "tsc -p tsconfig.json",
     "check": "npm run typecheck && node tools/gen-schema.mjs --check && npm test",
     "e2e": "node --test e2e/*.e2e.mjs",
-    "build": "node tools/preload.mjs"
+    "build": "node tools/preload.mjs",
+    "drill:local": "node tools/restore-drill-local.mjs",
+    "drill:staging": "node tools/restore-drill.mjs"
   },
   "devDependencies": {
     "typescript": "^7.0.2",

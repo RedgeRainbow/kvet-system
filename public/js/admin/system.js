@@ -38,9 +38,9 @@ export default async function ({ rerender }) {
     const bk = (await api('/backups', { kind: 'staff' })).list;
     const er = tab === 'errors' ? await api('/errors', { kind: 'staff' }) : null, hl = tab === 'health' ? await api('/health', { kind: 'staff' }) : null;
     el.innerHTML = pageHead(t('navSystem')) + tabs([['health', '🩺 ' + t('health')], ['backups', t('backups')], ...(can('delete') ? [['purge', t('purgeTitle')]] : []), ...(can('audit.view') ? [['errors', '⚠ ' + t('errorLog')]] : [])], tab)
-      + (tab === 'health' ? healthHtml(hl) : tab === 'errors' ? errorsHtml(er) : tab === 'backups' ? `<div class="card"><div class="ch"><h2>${esc(t('backups'))}</h2><span class="grow"></span>${can('backup.create') ? `<button class="btn" id="mk">＋ ${esc(t('createBackup'))}</button>` : ''}</div><p class="hint">${esc(t('backupHint'))}</p><p class="hint">${esc(t('backupHint2'))}</p>
+      + (tab === 'health' ? healthHtml(hl) : tab === 'errors' ? errorsHtml(er) : tab === 'backups' ? `<div class="card"><div class="ch"><h2>${esc(t('backups'))}</h2><span class="grow"></span>${can('backup.restore') ? `<button class="btn ghost" id="upb">⬆ ${esc(t('backupUpload'))}</button><input type="file" id="upf" accept=".kvb,.ndjson,.json" hidden> ` : ''}${can('backup.create') ? `<button class="btn" id="mk">＋ ${esc(t('createBackup'))}</button>` : ''}</div><p class="hint">${esc(t('backupHint'))}</p><p class="hint">${esc(t('backupHint2'))}</p><p class="hint">${esc(t('backupHint3'))}</p>
         ${can('backup.restore') ? `<div class="row" style="margin:6px 0 10px"><button class="btn ghost sm" id="lrep">${esc(t('repairLogins'))}</button><span class="hint">${esc(t('repairLoginsHint'))}</span></div>` : ''}
-        <div class="tw"><table><tbody>${bk.map(b => `<tr><td class="mono">${esc(b.key.replace('backups/', ''))}</td><td>${(b.size / 1024).toFixed(0)} KB</td><td class="act">${can('backup.download') ? `<button class="btn ghost sm" data-g="${esc(b.key)}" aria-label="${esc(t('download'))}" title="${esc(t('download'))}">⬇</button> ` : ''}${can('backup.restore') ? `<button class="btn ghost sm" data-r="${esc(b.key)}">${esc(t('restore'))}</button> ` : ''}${can('backup.delete') ? `<button class="btn bad ghost sm" data-d="${esc(b.key)}">🗑</button>` : ''}</td></tr>`).join('') || `<tr><td>${empty('💾', t('noBackups'))}</td></tr>`}</tbody></table></div></div>`
+        <div class="tw"><table><tbody>${bk.map(b => `<tr><td class="mono">${esc(b.key.replace('backups/', ''))}</td><td>${(b.size / 1024).toFixed(0)} KB</td><td class="act">${b.key.endsWith('.kvb') ? `<button class="btn ghost sm" data-v="${esc(b.key)}" title="${esc(t('backupVerifyHint'))}">✓ ${esc(t('backupVerify'))}</button> ` : ''}${can('backup.download') ? `<button class="btn ghost sm" data-g="${esc(b.key)}" aria-label="${esc(t('download'))}" title="${esc(t('download'))}">⬇</button> ${b.key.endsWith('.kvb') ? `<button class="btn ghost sm" data-p="${esc(b.key)}" title="${esc(t('backupPlainHint'))}">📄 ${esc(t('backupPlain'))}</button> ` : ''}` : ''}${can('backup.restore') ? `<button class="btn ghost sm" data-r="${esc(b.key)}">${esc(t('restore'))}</button> ` : ''}${can('backup.delete') ? `<button class="btn bad ghost sm" data-d="${esc(b.key)}">🗑</button>` : ''}</td></tr>`).join('') || `<tr><td>${empty('💾', t('noBackups'))}</td></tr>`}</tbody></table></div></div>`
         : `<div class="card"><h2>${esc(t('purgeTitle'))}</h2><p class="hint">${esc(t('purgeIntro'))}</p><div class="fg"><div class="full pick" style="max-height:none">${PK.map(k => `<label><input type="checkbox" data-pk="${k}"> ${esc(t('pk_' + k))}</label>`).join('')}</div>
           <label>${esc(t('purgeBefore'))}<input type="date" id="pb" max="${esc(A.today)}"><span class="hint">${esc(t('purgeBeforeHint'))}</span></label></div><div id="pimp" class="banner" style="margin-top:12px">${esc(t('purgePick'))}</div><button class="btn bad" id="pgo" disabled>🗑 ${esc(t('purgeRun'))}</button></div>`);
     if (tab === 'purge') wirePurge();
@@ -49,6 +49,15 @@ export default async function ({ rerender }) {
     $('#erq')?.addEventListener('input', e => { const q = e.target.value.trim().toLowerCase(); $$('#ert tr').forEach(tr => { tr.hidden = q && !tr.textContent.toLowerCase().includes(q); }); });
     $('#erc')?.addEventListener('click', async () => { if (await confirmDlg(t('clearLog') + '?', { danger: true })) { await api('/errors/clear', { kind: 'staff', body: {} }); draw(); } });
     $('#lrep')?.addEventListener('click', e => busy(e.target, async () => { const r = await api('/system/logins/repair', { kind: 'staff', body: {} }); toast(t('repairedN', r.count), 'ok'); }));
+    $('#upb')?.addEventListener('click', () => $('#upf').click());
+    $('#upf')?.addEventListener('change', async e => {
+      const f = e.target.files?.[0]; if (!f) return;
+      await busy($('#upb'), async () => {
+        const r = await fetch('/api/backup/upload', { method: 'POST', headers: { authorization: 'Bearer ' + tokenOf('staff'), 'content-type': 'application/octet-stream' }, body: f }), j = await r.json().catch(() => ({}));
+        if (!r.ok) { toast(t(j.error || 'server'), 'bad'); return; }
+        toast(j.total ? t('backupVerified', j.total) : t('saved'), 'ok'); draw();
+      });
+    });
     $('#mk')?.addEventListener('click', async e => { await busy(e.target, async () => { await api('/backup', { kind: 'staff', body: {} }); toast(t('saved'), 'ok'); draw(); }); });
   }
   function wirePurge() {
@@ -67,8 +76,14 @@ export default async function ({ rerender }) {
   await draw();
   el.onclick = async e => {
     const tb = e.target.closest('[data-tab]'); if (tb) { tab = tb.dataset.tab; return draw(); }
-    const b = e.target.closest('button[data-g],button[data-r],button[data-d]'); if (!b) return;
+    const b = e.target.closest('button[data-g],button[data-r],button[data-d],button[data-v],button[data-p]'); if (!b) return;
     if (b.dataset.g) { const r = await fetch('/api/backup/get?key=' + encodeURIComponent(b.dataset.g), { headers: { authorization: 'Bearer ' + tokenOf('staff') } }); download(await r.blob(), b.dataset.g.split('/')[1]); }
+    if (b.dataset.v) await busy(b, async () => { const r = await api('/backup/verify', { kind: 'staff', body: { key: b.dataset.v } }); toast(t('backupVerified', r.total), 'ok'); });
+    if (b.dataset.p && await confirmDlg(t('backupPlainConfirm'))) await busy(b, async () => {
+      const r = await fetch('/api/backup/get?plain=1&key=' + encodeURIComponent(b.dataset.p), { headers: { authorization: 'Bearer ' + tokenOf('staff') } });
+      if (!r.ok) { toast(t((await r.json().catch(() => ({}))).error || 'server'), 'bad'); return; }
+      download(await r.blob(), b.dataset.p.split('/')[1].replace(/\.kvb$/, '.ndjson'));
+    });
     if (b.dataset.r && await confirmDlg(t('confirmRestore'), { danger: true })) { await busy(b, async () => { await api('/restore', { kind: 'staff', body: { key: b.dataset.r } }); toast(t('restored'), 'ok'); await load(); draw(); }); }
     if (b.dataset.d && await confirmDlg(t('deleteConfirm'), { danger: true })) { await api('/backup/delete', { kind: 'staff', body: { key: b.dataset.d } }); draw(); }
   };

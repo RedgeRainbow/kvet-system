@@ -30,6 +30,7 @@ export function tracked(D) {
     del: async (col, id) => { const r = await D.del(col, id); note(col, [{ id }]); return r; },
     delMany: async (col, ids) => { const r = await D.delMany(col, ids); note(col, ids.map(id => ({ id }))); return r; },
     restore: async (...a) => { const r = await D.restore(...a); t.any = true; t.keys.add('rev|p|*'); return r; },
+    restoreApply: async (...a) => { const r = await D.restoreApply(...a); t.any = true; t.keys.add('rev|p|*'); return r; },
   };
   /* after the request: one bump per counter, in parallel */
   // many people changed at once (an import, a batch delete): one "all trainees" counter instead of one per person, so a

@@ -1,6 +1,6 @@
 /* Request context, responses, validation and shaping helpers shared by all route files. */
 import { H } from './store.js';
-import { rnd } from './auth.js';
+import { rnd, hmac } from './auth.js';
 import * as S from './shared.js';
 
 export { H, S };
@@ -57,19 +57,28 @@ export const getSettings = async D => (await D.get('settings', 'main')) || {};
 export const DEFAULT_ACCRED = [1, 2, 3, 4, 5, 6, 7].map(i => `default:${i}`);
 export const accredKeys = st => (Array.isArray(st.accred) ? st.accred : DEFAULT_ACCRED);
 export const assetUrl = k => (!k ? '' : String(k).startsWith('default:') ? `/img/accred/accred-${Number(String(k).slice(8))}.png` : '/api/asset/' + k);
-export async function assetsOut(D, st) {
+/* v3.36: only the logo and the accreditation logos are public pictures. Signature and stamp pictures are served to
+   signed-in office users alone: their addresses carry a pass (sigPass) that changes every day. `pass` = that pass. */
+const privUrl = (k, pass) => (k ? assetUrl(k) + '?s=' + pass : '');
+export async function assetsOut(D, st, pass = '') {
+  if (!pass) return { logo: assetUrl(st.logo), stamp: '', accred: accredKeys(st).map(assetUrl), sig: null, sigs: [] };       // portals and public pages
   const sigs = (await D.all('sigs')).map(r => r.data);
   const act = sigs.find(s => s.on);
-  return { logo: assetUrl(st.logo), stamp: assetUrl(st.stamp), accred: accredKeys(st).map(assetUrl), sig: act ? { id: act.id, img: assetUrl(act.key) } : null, sigs: sigs.map(s => ({ ...s, img: assetUrl(s.key) })) };
+  return { logo: assetUrl(st.logo), stamp: privUrl(st.stamp, pass), accred: accredKeys(st).map(assetUrl), sig: act ? { id: act.id, img: privUrl(act.key, pass) } : null, sigs: sigs.map(s => ({ ...s, img: privUrl(s.key, pass) })) };
 }
-/* For the candidate and company portals: the stamp only for somebody who holds a certificate, and only the signature
-   images those certificates carry - not every signature the centre has ever used. (The images still reach the browser
-   that draws the certificate; drawing certificates on the server would be the complete answer.) */
-export const assetsFor = (a, sigIds) => { const ids = new Set(sigIds.filter(Boolean)); return { ...a, stamp: sigIds.length ? a.stamp : '', sig: null, sigs: a.sigs.filter(s => ids.has(s.id)).map(s => ({ id: s.id, img: s.img })) }; };
+const DAY = 864e5, passOf = (env, day) => hmac(env.TOKEN_SECRET, 'sigview|' + day).then(h => h.slice(0, 32));
+export const sigPass = c => passOf(c.env, Math.floor(c.now() / DAY));
+/** a pass of today or of the two days before (an office page left open overnight keeps its pictures) */
+export async function sigPassOk(c, p) { if (!/^[a-f0-9]{32}$/.test(String(p || ''))) return false; const d = Math.floor(c.now() / DAY); for (const k of [d, d - 1, d - 2]) if (await passOf(c.env, k) === p) return true; return false; }
+/* what a candidate or a company receives of a certificate: never the address of the signature picture */
+/* sigPic: the certificate carries a signature picture. With "certificates drawn on the server" off (settings.serverCerts)
+   the owner's page asks for it through a signed-in request (GET /portal/…/cert/sig) to draw the certificate itself. */
+export const hasSigPic = x => !!(x.sign ? x.sign.mode === 'image' && x.sign.img : !x.esign && x.sigId);
+export const portalCert = (/** @type {any} */ { by, sk, exp, cox, approval, rem, sigId, ...x }) => ({ ...x, ...(x.sign ? { sign: { ...x.sign, img: undefined } } : {}), ...(hasSigPic({ ...x, sigId }) ? { sigPic: true } : {}) });
 export const remindCfg = st => ({ on: !!st.remind?.on, days: (st.remind?.days || [90, 30]).filter(d => Number.isInteger(d) && d > 0 && d <= 365).slice(0, 4), toCompany: st.remind?.toCompany !== false, toTrainee: st.remind?.toTrainee !== false });
 export const privacyCfg = st => ({ consentRequired: !!st.privacy?.consentRequired, finYears: Number.isInteger(st.privacy?.finYears) ? st.privacy.finYears : 0 });
 export const publicSettings = st => ({ company: st.company || {}, num: S.numCfg(st), soonDays: st.soonDays ?? S.SOON_DAYS, showFather: !!st.showFather, dash: S.dashCfg(st),
-  fbRequired: st.fbRequired !== false, certCompany: !!st.certCompany, mfa: st.mfa || 'off', forcePw: !!st.forcePw, remind: remindCfg(st), privacy: privacyCfg(st), approvals: S.approvalsCfg(st) });
+  fbRequired: st.fbRequired !== false, certCompany: !!st.certCompany, mfa: st.mfa || 'off', forcePw: !!st.forcePw, serverCerts: !!st.serverCerts, remind: remindCfg(st), privacy: privacyCfg(st), approvals: S.approvalsCfg(st) });
 
 /* ---------------------------------------------------------------- people */
 export const stripSecret = ({ hash, salt, sk, ...x }) => x;          // sk: search key (search.js), never sent

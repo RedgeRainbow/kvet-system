@@ -41,6 +41,12 @@ export interface Store {
   lockFail(k: string, max: number, secs: number): Promise<number>;
   lockOk(k: string): Promise<any>;
   lockSweep?(before: string): Promise<number>;
+  scan(col: string, fn: (rows: { id: string; data: any }[]) => any, size?: number): Promise<void>;
+  restoreBegin(): Promise<any>;
+  restoreAdd(rows: { col: string; id: string; data: any }[]): Promise<any>;
+  restoreApply(cols: string[], ctrs: any[]): Promise<any>;
+  fingerprint(): Promise<{ col: string; n: number; h: string }[]>;
+  auditPage?(spec: any): Promise<{ total: number; cats: Record<string, number>; users: string[]; list: any[] } | null>;
   /** field-level write of one record (store.js FIELD_COLS, schema.sql patch_record) */
   patch?(col: string, id: string, base: any, set: { p: string[]; v: any }[], unset: string[][]): Promise<any>;
   patchMany?(col: string, rows: { id: string; base: any; set: { p: string[]; v: any }[]; unset: string[][] }[]): Promise<any>;
@@ -53,6 +59,8 @@ export interface Store {
 export interface Ctx {
   env: any; req: Request; url: URL; params: any;
   D: Store; B: any; A: any;
+  /** a file of the site itself, by its path ("/fonts/Mulish-Regular.woff") */
+  files: (path: string) => Promise<Uint8Array>;
   now(): number; today(): string;
   user: any; me: any;
   body(): Promise<any>;

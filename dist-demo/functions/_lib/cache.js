@@ -94,5 +94,6 @@ export function cached(D) {
     async del(col, id) { const r = await D.del(col, id); del1(col, id); return r; },
     async delMany(col, ids) { const r = await D.delMany(col, ids); for (const id of ids) del1(col, id); return r; },
     async restore(...a) { const r = await D.restore(...a); one.clear(); full.clear(); misc.clear(); return r; },
+    async restoreApply(...a) { const r = await D.restoreApply(...a); one.clear(); full.clear(); misc.clear(); return r; },
   };
 }

@@ -1,5 +1,5 @@
 /* Public routes (no sign-in), staff sign-in and portal sign-in. */
-import { H, S, str, need, audit, getSettings, assetsOut } from './core.js';
+import { H, S, str, need, audit, getSettings, assetsOut, accredKeys, sigPassOk } from './core.js';
 import { pbk, hmac, mkTok, loginKey, attempt, attemptOk, attemptBad, attemptKeys, same, rounds, PBK_MIN } from './auth.js';
 import { checkCode } from './signs.js';
 
@@ -56,8 +56,11 @@ export const publicRoutes = {
   'GET /asset/:key': { auth: 'none', raw: true, async fn(c) {
     const n = c.params.key;
     if (!/^[a-f0-9]{16}\.png$/.test(n)) throw new H(404, 'noRec');
+    // public: the logo and the accreditation logos in use. Everything else here is a signature or a stamp: office users only
+    const st = await getSettings(c.D), open = n === st.logo || accredKeys(st).includes(n);
+    if (!open && !(await sigPassOk(c, c.url.searchParams.get('s')))) throw new H(404, 'noRec');
     const o = await c.B.get('assets/' + n); if (!o) throw new H(404, 'noRec');
-    return new Response(o.body, { headers: { 'content-type': 'image/png', 'cache-control': 'public,max-age=31536000,immutable' } });
+    return new Response(o.body, { headers: { 'content-type': 'image/png', 'cache-control': open ? 'public,max-age=31536000,immutable' : 'private,max-age=600' } });
   } },
 
   /* ---- staff sign-in (Supabase Auth behind the API). Every attempt lands in the audit trail. ---- */

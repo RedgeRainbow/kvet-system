@@ -686,3 +686,23 @@ before the hand-in (answers kept on the phone, sent when it is back, all counted
 | 28 | A backup too big for one request would fail without warning | Past 30 MB the superadmins get a notification and an audit row (`backup.large`) | — |
 
 Not in this version (see the audit report, section 6): certificates drawn on the server, a split / encrypted backup format, the audit page filtered in the database, `package-lock.json` (run `npm install` and commit it), a narrower `connect-src`, reformatting of the server code.
+
+# v3.36 (after go-live: backups, certificates on the server, the audit page)
+
+**Before the deploy: run `schema.sql` again in Supabase** (it adds `records_fingerprint` and `audit_page`; no data changes; safe to repeat). Until it has run, the audit page works the old way and `GET /backup/fingerprint` answers from the application.
+**After the deploy:** set `BACKUP_KEY` and store a copy outside Cloudflare, then run the staging restore drill (DEPLOY.md 3c). Old `.json` backups stay restorable.
+
+| # | Item | Fix | Test |
+|---|---|---|---|
+| 1 | Backups were built whole in memory and stored as readable text | Written as an encrypted stream (`backup.js`: AES-256-GCM in 64 KB frames, R2 multipart past 8 MB); nothing is held whole. Format v3 also carries the audit trail, the users with their roles and the small pictures | phase4: encrypted at rest; a large database goes up in equal parts |
+| 2 | The restore path had never been exercised | `restoreFrom` stages and swaps in one transaction; a restore checks the whole file before anything changes. Drilled on PostgreSQL 16 through the real storage code: all records deleted, restored, checksums identical (`tools/restore-drill-local.mjs`); `tools/restore-drill.mjs` does the same on a staging deployment | phase4: wipe and restore; a new empty database; damaged / cut-off / foreign files refused |
+| 3 | A bad backup would only be noticed on the day it was needed | The nightly job reads its own backup back and counts it; failure -> notification + `backup.bad` | phase4 |
+| 4 | No way back in once a backup had left the bucket | System -> Backups: upload (encrypted, readable copy, or `.json` from before v3.36), "Check", readable copy (audited) | phase4 |
+| 5 | The candidate's and the company's browser received the signature picture and drew the certificate itself | **Settings -> "Draw certificates on the server"** (off by default; needs the Workers Paid plan). On: the server draws the PDF (`certpdf.js`, `pdf.js`, `font.js`, `png.js`: no dependencies; text stays selectable) and portals get `cert.pdf` only. Off: the owner's browser draws it as before, and the signature picture is given only to the signed-in owner of that certificate (`cert/sig`), never by a public address | phase4: certificate PDF; Free plan; e2e: company portal on / off |
+| 6 | Signature and stamp pictures were public files for anyone who knew the address | `/api/asset` serves only the logo and the accreditation logos without the daily office pass. Addresses given out earlier are dead | phase4 |
+| 7 | The electronic-signature line of a certificate ran off the right edge since codes became longer (v3.35) | It grows to the left instead (browser and PDF) | visual comparison |
+| 8 | The audit page read whole months into the worker and filtered there | `audit_page` in the database: one day 5 ms, three months of 118,000 rows 0.4 s on a 600,000-row trail; the old way remains as a fallback until `schema.sql` has run. A "to" date without "from" no longer returns nothing | phase4 world + 27 filter combinations compared with the old rules |
+| 9 | A trainer account could upload question pictures without limit (L14) | 100 new pictures a day per trainer; a repeated picture is not stored twice | phase4 |
+
+Still open, and why: `package-lock.json` (M14: needs `npm install` on a machine with network access); `connect-src https:` (L8: needs the list of camera-bridge hosts each office uses); the bootstrap e-mail rule (L1: safe while Supabase sign-ups are off, DEPLOY.md 2); usage counts and the retention job read every session (L16: light, field-limited reads; worth moving into SQL past roughly 50,000 sessions); code density (L18: a formatting-only change, to be made alone). Signature pictures inside *session documents* signed "with picture" by office staff are still drawn by the office browser only; trainers' and candidates' pages never show them.
+

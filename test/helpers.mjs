@@ -1,11 +1,14 @@
 import { createHandler } from '../functions/_lib/index.js';
+import { readFile } from 'node:fs/promises';
+/* the site's own files (fonts, built-in pictures), which Pages serves through env.ASSETS */
+export const siteFile = async p => new Uint8Array(await readFile(new URL('../public' + p, import.meta.url)));
 import { memoryStore, memoryBucket } from '../functions/_lib/store.js';
 import { memoryAuth } from '../functions/_lib/auth.js';
 
 export function makeApp({ now = () => Date.parse('2026-10-29T08:00:00Z'), rand = () => 1 } = {}) {
   const store = memoryStore(), bucket = memoryBucket(), auth = memoryAuth();
   const clock = { t: now() };
-  const handle = createHandler({ store: () => store, bucket: () => bucket, auth: () => auth, now: () => clock.t, rand });
+  const handle = createHandler({ store: () => store, bucket: () => bucket, auth: () => auth, now: () => clock.t, rand, files: () => siteFile });
   const env = { TOKEN_SECRET: 'test-secret-test-secret', BOOTSTRAP_ADMIN_EMAIL: 'boss@kvet.az' };
   auth.addUser('boss@kvet.az', 'bosspass123');
   async function call(method, path, { token, body, raw, headers } = {}) {

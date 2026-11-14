@@ -64,7 +64,7 @@ export const DOC_CSS = FONT_CSS + `
 .cert .sig{left:352.6px;top:809.3px;width:380px;text-align:left;font-size:15.7px;white-space:nowrap}
 .cert .sig .sl{display:inline-block;width:237px;height:1px;position:relative;vertical-align:baseline}
 .cert .sig .sl img{position:absolute;left:50%;bottom:-6px;transform:translateX(-50%);max-height:64px;max-width:237px;object-fit:contain}
-.cert .esig{left:420.6px;top:866px;width:330px;text-align:center;font-size:9.5px;line-height:1.35;color:#555;white-space:nowrap}
+.cert .esig{right:43.4px;top:866px;width:max-content;min-width:330px;text-align:center;font-size:9.5px;line-height:1.35;color:#555;white-space:nowrap}
 .cert .sig .who{position:absolute;left:68px;width:330px;top:16.6px;text-align:center;font-size:13.7px;line-height:1.3;white-space:nowrap}.cert .sig .who b{font-weight:600}
 .cert .sig .sl.st{margin-left:14px}.cert .sig .estamp{position:absolute;left:50%;bottom:-3px;transform:translateX(-50%);border:1.5px solid #3568b4;color:#3568b4;border-radius:6px;padding:3px 9px;font-size:11px;font-weight:600;white-space:nowrap;line-height:1.25}
 .cert .sig small{color:#111;position:absolute;left:176.6px;top:16.6px;font-size:13.7px;white-space:nowrap}
@@ -112,6 +112,11 @@ export const DOC_CSS = FONT_CSS + `
 /* ------------------------------------------------------------------ helpers */
 const addressLine = info => ['address', 'phone', 'email', 'website'].map(k => info?.[k] ? ({ address: 'Address: ', phone: 'Tel: ', email: 'Email ', website: '' }[k]) + info[k] : '').filter(Boolean).join(' | ');
 export const verifyUrl = c => `${location.origin}/verify.html?n=${encodeURIComponent(c.no)}&h=${encodeURIComponent(c.vh || '')}`;
+/* Signature pictures are served to signed-in office users only: their address needs the day's pass (GET /state -> sigPass).
+   The candidate and company portals never draw a signature - they show the PDF the server drew (certpdf.js). */
+let SIG_PASS = '';
+export const setSigPass = p => { SIG_PASS = p ? '?s=' + encodeURIComponent(p) : ''; };
+export const sigSrc = key => '/api/asset/' + key + SIG_PASS;
 export const logoSrc = assets => assets?.logo || '/img/logo.png';
 
 /* ------------------------------------------------------------- certificate
@@ -131,7 +136,7 @@ export function certHtml(c, assets = /** @type {any} */ ({}), info = /** @type {
   // signature: by an admin / superadmin / approver under their own name - their signature image, or the electronic stamp.
   // (c.sigId = company signature image of certificates released by earlier versions)
   const sg = noSign ? null : c.sign || (c.esign ? { ...c.esign, mode: 'esign' } : null);
-  const sig = sg?.mode === 'image' && sg.img ? '/api/asset/' + sg.img : !noSign && !sg ? assets.sigs?.find(x => x.id === c.sigId)?.img : '';
+  const sig = c.sigData && !noSign ? c.sigData : sg?.mode === 'image' && sg.img ? sigSrc(sg.img) : !noSign && !sg ? assets.sigs?.find(x => x.id === c.sigId)?.img : '';
   const names = s.names || { az: '', en: '' };
   const foot = en ? b.footEn || '' : [b.footAz, b.footEn].filter(Boolean).join(' / ');
   // every fixed text comes from the template / the certificate (blank.labels); an empty one hides its line

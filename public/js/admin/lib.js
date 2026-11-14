@@ -2,7 +2,7 @@
 import { api } from '../api.js';
 import * as S from '../shared.js';
 import { $, $$, esc, t, lang, toast, fail, busy, openModal, confirmDlg, download, csvCell, empty, badge, opts, norm, paged, pagerHtml, pageState, resetPage, onPage } from '../ui.js';
-import { slipsHtml, printHtml, htmlToPdf } from '../cert.js';
+import { slipsHtml, printHtml, htmlToPdf, setSigPass } from '../cert.js';
 import { writeXlsx } from '../xlsx.js';
 import { personForm, bindPerson } from '../person.js';
 
@@ -17,7 +17,7 @@ export const info = () => ({ ...(A.settings.company || {}) });
    are kept in A.people (filled from server answers; ensurePeople() fetches the missing ones). */
 export async function load() {
   const d = await api('/state', { kind: 'staff' });
-  Object.assign(A, d); A.certs = null; return A;
+  Object.assign(A, d); A.certs = null; setSigPass(d.sigPass); return A;
 }
 A.people = new Map();
 export const rememberPeople = list => { for (const x of list || []) if (x?.id) A.people.set(x.id, x); return list; };

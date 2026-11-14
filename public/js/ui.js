@@ -66,6 +66,17 @@ export function download(blob, name) {
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; document.body.append(a); a.click();
   setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 2000);
 }
+/* A PDF made by the server (certificates in the portals): shown inside the page on a computer; on a phone or tablet -
+   where browsers do not show PDFs inside a page - opened in the device's own viewer. Printing goes through that viewer. */
+/** a picture fetched with the sign-in (blob) as a data: address, usable in print windows and PDF export alike */
+export const dataUrl = blob => new Promise((ok, no) => { const r = new FileReader(); r.onload = () => ok(String(r.result)); r.onerror = () => no(r.error); r.readAsDataURL(blob); });
+export function showPdf({ title, blob, name }) {
+  const url = URL.createObjectURL(blob), inPage = innerWidth >= 760 && !matchMedia('(pointer:coarse)').matches;
+  const m = openModal({ title, wide: true, html: `${inPage ? `<iframe src="${url}#toolbar=0&view=FitH" title="${esc(title)}" style="width:100%;height:min(72vh,900px);border:1px solid var(--line);background:#fff"></iframe>` : `<p class="hint">${esc(t('pdfOnPhone'))}</p>`}
+    <div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap"><a class="btn${inPage ? ' ghost' : ''}" href="${url}" target="_blank" rel="noopener">${esc(inPage ? '🖨 ' + t('print') : t('open'))}</a><a class="btn ghost" href="${url}" download="${esc(name)}">⬇ PDF</a></div>`, buttons: [{ label: t('close'), cls: 'ghost', id: 'x' }] });
+  m.promise.then(() => setTimeout(() => URL.revokeObjectURL(url), 60000));
+  return m;
+}
 export const csvCell = v => '"' + String(v ?? '').replace(/"/g, '""') + '"';
 export const empty = (icon, text, extra = '') => `<div class="empty"><div class="big">${icon}</div><div>${esc(text)}</div>${extra}</div>`;
 export const loading = () => `<div class="load"><span class="spin" role="status" aria-label="${esc(t('loading'))}"></span></div>`;

@@ -1,6 +1,7 @@
 /* Trainer, trainee and company portal routes. Portals never receive the ID/FIN. */
 import { aiCfg, aiReady } from './ai.js';
-import { H, S, str, need, num, bool, audit, enrId, getSettings, assetsOut, assetsFor, publicSettings, personLite, enrOf, saveEnr, enrsOfSession, sessionRow, enrsFor, sessionsOf, daysBefore } from './core.js';
+import { H, S, str, need, num, bool, audit, enrId, getSettings, assetsOut, portalCert, hasSigPic, publicSettings, personLite, enrOf, saveEnr, enrsOfSession, sessionRow, enrsFor, sessionsOf, daysBefore } from './core.js';
+import { certDocument } from './certpdf.js';
 import { confirmFor, confirmAll, saveEvaluation, savePractical, loadEnrolled, rollCall, openDocs, docsGate } from './ops.js';
 import { pbk, rnd, same, mkTok, rounds } from './auth.js';
 import { sign, slot, sessionSigns } from './signs.js';
@@ -161,6 +162,23 @@ async function certsOf(c, tid) {
 }
 /* A candidate sent by a company sees only THAT they hold a certificate (training, dates, status); the document itself
    (view, print, download) belongs to the company. Private candidates get their own certificates. */
+async function ownCert(c, kind) {
+  const x = await c.D.get('certs', S.normCertNo(str(c.url.searchParams.get('no'), 60)));
+  if (kind === 'company') { need(x && x.co === c.me.id && !x.revoked && S.certDelivered(x), 'noRec', 404); return x; }
+  need(x && x.tid === c.me.id && S.certDelivered(x), 'noRec', 404);
+  const co = c.me.co ? await c.D.get('companies', c.me.co) : null; need(!(co && !S.isPrivateCompany(co.name, co.id)), 'forbidden', 403);   // sent by a company: the company hands the certificate over
+  return x;
+}
+async function sigResponse(c, x) {
+  need(!(await getSettings(c.D)).serverCerts && hasSigPic(x), 'noRec', 404);
+  const key = x.sign ? x.sign.img : (await c.D.get('sigs', x.sigId))?.key, o = /^[a-f0-9]{16}\.png$/.test(String(key || '')) ? await c.B.get('assets/' + key) : null; need(o, 'noRec', 404);
+  return new Response(o.body, { headers: { 'content-type': 'image/png', 'cache-control': 'private, no-store' } });
+}
+async function pdfResponse(c, x) {
+  need((await getSettings(c.D)).serverCerts, 'certPdfOff', 409);
+  const pdf = await certDocument(c, x);
+  return new Response(/** @type {any} */ (pdf), { headers: { 'content-type': 'application/pdf', 'content-disposition': `inline; filename="${x.no.replace(/[^A-Za-z0-9]+/g, '-')}.pdf"`, 'cache-control': 'private, no-store' } });
+}
 const certFact = x => ({ fact: true, training: x.snap?.blank?.name || '', start: x.start, end: x.end, expiry: x.expiry, st: x.st });
 /** @type {import('../../types/store').Routes} */
 const traineeRoutes = {
@@ -211,7 +229,7 @@ const traineeRoutes = {
     const certs = certs0.filter(x => x.st !== 'REVOKED');
     return { today, company: co && !S.isPrivateCompany(co.name, co.id) ? co.name : '', me: { ...personLite(me), login: me.login, ...names(me), phone: me.phone || '', email: me.email || '' },
       ai: aiFlags,
-      sessions, certs: viaCompany ? certs.map(certFact) : certs.map(({ by, sk, exp, cox, approval, rem, ...x }) => x), certsViaCompany: viaCompany, info: st.company || {}, assets: assetsFor(assets, viaCompany ? [] : certs.map(x => x.sigId || '')), settings: publicSettings(st) };
+      sessions, certs: viaCompany ? certs.map(certFact) : certs.map(portalCert), certsViaCompany: viaCompany, certPdf: !!st.serverCerts, info: st.company || {}, assets, settings: publicSettings(st) };
   } },
 
   'POST /portal/trainee/feedback': { auth: 'trainee', async fn(c) {
@@ -298,8 +316,17 @@ const companyRoutes = {
   } },
   'GET /portal/company/cert': { auth: 'company', async fn(c) {
     const x = await c.D.get('certs', S.normCertNo(str(c.url.searchParams.get('no'), 60))); need(x && x.co === c.me.id && !x.revoked && S.certDelivered(x), 'noRec', 404);
-    const st = await getSettings(c.D), { by, sk, exp, cox, approval, rem, ...o } = x; return { cert: { ...o, st: certSt(x, c.today(), st.soonDays ?? S.SOON_DAYS) } };
+    const st = await getSettings(c.D); return { cert: { ...portalCert(x), st: certSt(x, c.today(), st.soonDays ?? S.SOON_DAYS) } };
   } },
+  /* The certificate itself, for its owner. Settings -> "certificates drawn on the server" (serverCerts):
+     on  - cert.pdf: the finished PDF (certpdf.js); the signature picture never reaches the browser
+     off - (Workers Free plan: drawing costs more processor time than it allows) the owner's page draws the certificate
+           as before v3.36 and fetches the signature picture with its sign-in (cert/sig). The picture still has no public
+           address: only the owner of a certificate that carries it can ask for it. */
+  'GET /portal/company/cert.pdf': { auth: 'company', raw: true, async fn(c) { return pdfResponse(c, await ownCert(c, 'company')); } },
+  'GET /portal/trainee/cert.pdf': { auth: 'trainee', raw: true, async fn(c) { return pdfResponse(c, await ownCert(c, 'trainee')); } },
+  'GET /portal/company/cert/sig': { auth: 'company', raw: true, async fn(c) { return sigResponse(c, await ownCert(c, 'company')); } },
+  'GET /portal/trainee/cert/sig': { auth: 'trainee', raw: true, async fn(c) { return sigResponse(c, await ownCert(c, 'trainee')); } },
   'GET /portal/company/home': { auth: 'company', async fn(c) {
     const co = c.me, st = await getSettings(c.D), today = c.today();
     const trainees = (await c.D.byField('trainees', 'co', co.id)).map(r => r.data);
@@ -307,13 +334,12 @@ const companyRoutes = {
     // viewing / PDF comes from GET /portal/company/cert. Years of history stay out of the page.
     const soon = st.soonDays ?? S.SOON_DAYS;
     const certs = (await c.D.query('certs', { where: [['co', 'eq', co.id], ['revoked', 'null', true], ['renewed', 'null', true]] })).rows.map(r => r.data).filter(S.certDelivered);
-    const live = certs.map(({ by, vh, sk, exp, cox, approval, rem, snap, ...x }) => ({ ...x, st: certSt(x, today, soon), snap: snap && { names: snap.names, foreign: snap.foreign, att: snap.att, company: snap.company, blank: { name: snap.blank?.name || '' } } }));   // no staff e-mail addresses in the company portal
+    const live = certs.map((/** @type {any} */ { by, vh, sk, exp, cox, approval, rem, snap, sigId, sign, ...x }) => ({ ...x, ...(sign ? { sign: { ...sign, img: undefined } } : {}), st: certSt(x, today, soon), snap: snap && { names: snap.names, foreign: snap.foreign, att: snap.att, company: snap.company, blank: { name: snap.blank?.name || '' } } }));   // no staff e-mail addresses in the company portal
     const nBy = new Map(); for (const x of live) nBy.set(x.tid, (nBy.get(x.tid) || 0) + 1);
     return { today, company: { id: co.id, name: co.name, contactPerson: co.contactPerson || '', phone: co.phone || '', email: co.email || '', reqOptional: !!co.reqOptional },
       trainees: trainees.map(t => ({ ...personLite(t), certs: nBy.get(t.id) || 0 })),
       certs: live, counters: S.certCounters(live), info: st.company || {}, settings: publicSettings(st),
-      // signatures of every certificate of this company (older ones can still be opened and printed)
-      assets: assetsFor(await assetsOut(c.D, st), (await c.D.query('certs', { where: [['co', 'eq', co.id]], fields: ['sigId'] })).rows.map(r => /** @type {any} */ (r.data).sigId || '')) };
+      certPdf: !!st.serverCerts, assets: await assetsOut(c.D, st) };
   } },
 };
 

@@ -13,7 +13,7 @@ const store = memoryStore(), bucket = memoryBucket(), auth = memoryAuth();
 auth.addUser('boss@kvet.az', 'bosspass123');
 export const clock = { offset: 0 };
 export { store };   // tests and demos can pre-load data
-const handle = createHandler({ store: () => store, bucket: () => bucket, auth: () => auth, now: () => Date.now() + clock.offset });
+const handle = createHandler({ store: () => store, bucket: () => bucket, auth: () => auth, now: () => Date.now() + clock.offset, files: () => async p => new Uint8Array(await fs.promises.readFile(path.join(root, p))) });
 const env = { TOKEN_SECRET: 'dev-secret-dev-secret', BOOTSTRAP_ADMIN_EMAIL: 'boss@kvet.az', ...(process.env.EMERGENCY_PASSWORD ? { EMERGENCY_PASSWORD: process.env.EMERGENCY_PASSWORD } : {}) };
 /* DEV_FAKE_AI=1: a stand-in "model" for trying the AI screens without a key. It answers from the first excerpt it is given
    (so the knowledge-base rules can be seen working) and never contacts any service. */

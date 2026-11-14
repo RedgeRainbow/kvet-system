@@ -332,6 +332,49 @@ declare c int; begin
  end if;
  delete from records_restore; return c; end $$;
 
+-- ---------------------------------------------------------------- the audit page, computed here
+-- p = { lo, hi: id bounds of the period ('' = open; ids begin with the UTC time), user, cat, text, entity, history,
+--       lim, off, cats: [[category, regular expression], …] in order (the app's own list; anything else is 'system') }
+-- Returns { total, cats: {category: count}, users: [names, latest first, 100 at most], list: [one page of rows, newest first] }.
+-- history = one record's story: every row that carries its id in the index (data->>'eid'), plus mentions of it in the
+-- text of rows since lo.
+create or replace function audit_page(p jsonb) returns jsonb language plpgsql stable as $$
+declare lo text := coalesce(p->>'lo', ''); hi text := coalesce(nullif(p->>'hi', ''), '~');      -- '~' sorts after every id
+        ent text := coalesce(p->>'entity', ''); hist boolean := coalesce((p->>'history')::boolean, false);
+        usr text := coalesce(p->>'user', ''); cat0 text := coalesce(p->>'cat', ''); txt text := coalesce(p->>'text', '');
+        lim int := least(greatest(coalesce((p->>'lim')::int, 100), 1), 500); off0 int := greatest(coalesce((p->>'off')::int, 0), 0);
+        res jsonb;
+begin
+  with base as (
+    select r.id, r.data from records r where r.col = 'audit' and r.id >= lo and r.id < hi                         -- the period: an index range
+    union all
+    select r.id, r.data from records r where hist and r.col = 'audit' and r.data->>'eid' = ent and not (r.id >= lo and r.id < hi)
+  ), acts as (                                                                                                    -- the category of each distinct action, worked out once
+    select a.action, coalesce((select c->>0 from jsonb_array_elements(coalesce(p->'cats', '[]'::jsonb)) with ordinality as t(c, o) where a.action ~ (c->>1) order by o limit 1), 'system') as cat
+    from (select distinct coalesce(data->>'action', '') as action from base) a
+  ), f as (
+    select b.id, b.data, k.cat from base b join acts k on k.action = coalesce(b.data->>'action', '')
+    where ( usr = '' or strpos(lower(coalesce(b.data->'by'->>'name', '')), usr) > 0 or lower(coalesce(b.data->'by'->>'role', '')) = usr )
+      and ( cat0 = '' or k.cat = cat0 )
+      and ( ent = '' or b.data->'entity'->>'id' = ent or strpos(coalesce(b.data->>'detail', ''), ent) > 0 )
+      and ( txt = '' or strpos(lower(concat_ws(' ', coalesce(b.data->>'action', ''), coalesce(b.data->>'detail', ''), coalesce(b.data->'by'->>'name', ''), coalesce(b.data->'entity'->>'label', ''), coalesce(b.data->'entity'->>'id', ''), coalesce(b.data->>'ip', ''),
+              coalesce((select string_agg(concat_ws(' ', c->>'f', c->>'from', c->>'to'), ' ') from jsonb_array_elements(case when jsonb_typeof(b.data->'changes') = 'array' then b.data->'changes' else '[]'::jsonb end) c), ''))), txt) > 0 )
+  )
+  select jsonb_build_object(
+    'total', (select count(*) from f),
+    'cats',  coalesce((select jsonb_object_agg(cat, n) from (select cat, count(*) n from f group by cat) c), '{}'::jsonb),
+    'users', coalesce((select jsonb_agg(name order by last desc) from (select data->'by'->>'name' as name, max(id) as last from f where coalesce(data->'by'->>'name', '') <> '' group by 1 order by 2 desc limit 100) u), '[]'::jsonb),
+    'list',  coalesce((select jsonb_agg(data order by id desc) from (select id, data from f order by id desc limit lim offset off0) l), '[]'::jsonb))
+  into res;
+  return res;
+end $$;
+
+-- one line per collection: number of records and a checksum over all of them. A restore drill compares this before the
+-- wipe and after the restore (tools/restore-drill.mjs, GET /api/backup/fingerprint).
+create or replace function records_fingerprint() returns table(col text, n bigint, h text) language sql stable as $$
+  select r.col, count(*), md5(string_agg(r.id || ':' || md5(r.data::text), ',' order by r.id)) from records r group by r.col order by r.col
+$$;
+
 -- ---------------------------------------------------------------- the audit trail is append-only, also for the service key
 -- The app only ever adds rows. These rules make that a property of the database: a row of the audit trail cannot be
 -- changed or deleted, and the table cannot be emptied, by anybody who is not the database owner working in the SQL Editor
@@ -402,7 +445,7 @@ create or replace function table_sizes() returns table(col text, rows bigint, by
   from pg_inherits i join pg_class c on c.oid = i.inhrelid where i.inhparent = 'records'::regclass order by 3 desc $$;
 
 revoke execute on function next_seq(text), bump_seq(text, bigint), next_seq_n(text,int), login_fail(text,int,int), login_state(text), login_ok(text), login_sweep(timestamptz),
-  apply_restore(text[],jsonb), records_in(text, text, text[], text[]), patch_record(text, text, jsonb, jsonb, jsonb), patch_records(text, jsonb), db_size(), table_sizes() from public, anon, authenticated;
+  apply_restore(text[],jsonb), records_in(text, text, text[], text[]), patch_record(text, text, jsonb, jsonb, jsonb), patch_records(text, jsonb), records_fingerprint(), audit_page(jsonb), db_size(), table_sizes() from public, anon, authenticated;
 
 -- ---------------------------------------------------------------- indexes (each on its own collection table)
 -- Every list the app shows is filtered, counted and paged by the database; these keep it fast with years of data.

@@ -1,5 +1,5 @@
 /* Staff routes: bootstrap state, settings, uploads, numbering, users, backups, audit log, cameras, deletes, starter templates. */
-import { H, S, J, str, num, need, bool, uid, audit, getSettings, assetsOut, publicSettings, traineeOut, trainerOut, stripSecret, sessionRow, enrsFor, daysBefore, RECENT_DAYS, queryIn, diff, accredKeys, bakuDayStart, bakuDayEnd } from './core.js';
+import { H, S, J, str, num, need, bool, uid, audit, getSettings, assetsOut, publicSettings, traineeOut, trainerOut, stripSecret, sessionRow, enrsFor, daysBefore, RECENT_DAYS, queryIn, diff, accredKeys, bakuDayStart, bakuDayEnd, sigPass } from './core.js';
 import { reindex, SK_VERSION } from './search.js';
 import { rnd, seal, unseal, loginKey } from './auth.js';
 import { runReminders, runRetention } from './jobs.js';
@@ -9,6 +9,7 @@ import { suggestNo } from './routes_training.js';
 import { notify, doneNotes } from './routes_notify.js';
 import { rebuildFins } from './routes_people.js';
 import { forgetStaff } from './routes_dm.js';
+import { r2Sink, sealer, opened, lines, dumpTo, restoreFrom, keyFits, checkBackup } from './backup.js';
 
 export const DCOLS = ['blanks', 'sheets', 'tests', 'groups', 'kb', 'materials', 'companies', 'trainers', 'trainees', 'sessions', 'enr', 'rel', 'signs', 'certs', 'archive', 'retired', 'fins', 'logins', 'requests', 'candreq', 'libdocs', 'cogroups', 'notes', 'nseen', 'threads', 'msgs', 'links', 'settings', 'sigs', 'cams', 'snaps', 'audit'];
 /* A restore replaces everything EXCEPT the audit trail (and staff accounts, which live in Supabase Auth): the trail of who did what is never rewritten. */
@@ -22,24 +23,16 @@ async function rebuildLogins(c) {
   await c.D.put('logins', rows); return n;
 }
 
-async function dump(c) {
-  const cols = {}; for (const k of DCOLS) cols[k] = await c.D.all(k);
-  return { v: 2, at: new Date(c.now()).toISOString(), cols, counters: await c.D.counters() };
-}
+/* everything a backup carries: the collections above plus the staff list (kept for reference; a restore does not touch it) */
+const BCOLS = [...DCOLS, 'staff'];
+/* A backup is written as a stream, encrypted (backup.js): the database is never in memory as a whole. */
 async function makeBackup(c, tag = '') {
-  const key = `backups/kvet-${new Date(c.now()).toISOString().replace(/[:.]/g, '-')}${tag}.json`;
-  const body = JSON.stringify(await dump(c)); await c.B.put(key, body, { httpMetadata: { contentType: 'application/json' } });
-  // The whole backup is built in memory (128 MB per request on Cloudflare). Past 30 MB of text the superadmins are told,
-  // once per backup, long before it can fail: time to move the audit trail out of the backup or to split it.
-  if (body.length > BACKUP_WARN) try {
-    await audit(c, 'backup.large', `${key} · ${Math.round(body.length / 1048576)} MB`);
-    await notify(c, (await c.D.all('staff')).filter(r => r.data.role === 'superadmin').map(r => 'staff:u:' + r.id), 'nBackupLarge', [Math.round(body.length / 1048576)], '#/system');
-  } catch {}
+  const key = `backups/kvet-${new Date(c.now()).toISOString().replace(/[:.]/g, '-')}${tag}.kvb`, out = r2Sink(c.B, key, { httpMetadata: { contentType: 'application/octet-stream' } });
+  try { const w = await sealer(c.env, out); await dumpTo(c, w, BCOLS); await w.end(); await out.close(); } catch (e) { await out.abort(); throw e; }
   return key;
 }
-export const BACKUP_WARN = 30 * 1048576;
 const listBackups = async c => (await c.B.list({ prefix: 'backups/', limit: 1000 })).objects.map(o => ({ key: o.key, size: o.size, at: o.uploaded })).sort((a, b) => (a.key < b.key ? 1 : -1));
-const goodKey = k => /^backups\/[\w.-]+\.json$/.test(k || '');
+const goodKey = k => /^backups\/[\w.-]+\.(json|kvb)$/.test(k || '');      // .json: made before v3.36 (one plain JSON object)
 const png = buf => { const b = new Uint8Array(buf.slice(0, 4)); return b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4e && b[3] === 0x47; };
 const jpg = buf => { const b = new Uint8Array(buf.slice(0, 3)); return b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff; };
 
@@ -57,15 +50,17 @@ const PURGE = {
 const PURGE_KEYS = [...Object.keys(PURGE), 'archive', 'snaps'];
 
 /* Groups audit actions for the filter chips. */
-export function auditCat(a) {
-  a = String(a || '');
-  if (/^(login|logout)/.test(a)) return 'auth';
-  if (/^(delete|purge|archive|cert\.restore\.archive|backup\.delete|user\.delete|camera\.(delete|clear))/.test(a)) return 'delete';
-  if (/^(cert|release|issue)/.test(a)) return 'cert';
-  if (/^(trainee|trainer|company|credentials)/.test(a)) return 'people';
-  if (/^(session|attendance|enr|practical|exam|feedback|trainer\.evaluate|material|blank|sheet)/.test(a)) return 'training';
-  return 'system';
-}
+/* Category of an audit action: the first rule that matches (plain regular expressions - the database applies the very
+   same list in audit_page, so the page and its counts can never disagree between the two). */
+export const AUDIT_CATS = [
+  ['auth', '^(login|logout)'],
+  ['delete', '^(delete|purge|archive|cert\\.restore\\.archive|backup\\.delete|user\\.delete|camera\\.(delete|clear))'],
+  ['cert', '^(cert|release|issue)'],
+  ['people', '^(trainee|trainer|company|credentials)'],
+  ['training', '^(session|attendance|enr|practical|exam|feedback|trainer\\.evaluate|material|blank|sheet)'],
+];
+const CAT_RX = AUDIT_CATS.map(([k, rx]) => /** @type {[string, RegExp]} */ ([k, new RegExp(rx)]));
+export function auditCat(a) { a = String(a || ''); for (const [k, rx] of CAT_RX) if (rx.test(a)) return k; return 'system'; }
 
 /* external auditors read records but not people's contact details (phone, e-mail, logins) */
 function people(role, companies, trainers, trainees) {
@@ -113,7 +108,7 @@ export const systemRoutes = {
     const by = await enrsFor(c.D, sessions.map(s => s.id)), trainees = [];
     const me = (await c.D.get('staff', c.user.id)) || /** @type {import('../../types/records').StaffRecord} */ ({});
     const emergency = c.user.role === 'superadmin' ? (st.emergencyUses || []).filter(u => u.at > (st.emergencyAck || '')) : c.user.emergency ? true : undefined;
-    return { role: c.user.role, emergency, me: { id: c.user.id, email: c.user.email, name: me.name || '', title: me.title || '', sigImg: me.sigKey ? '/api/asset/' + me.sigKey : '' }, today, settings: publicSettings(st), assets: await assetsOut(c.D, st),
+    return { role: c.user.role, emergency, me: { id: c.user.id, email: c.user.email, name: me.name || '', title: me.title || '', sigImg: me.sigKey ? '/api/asset/' + me.sigKey + '?s=' + await sigPass(c) : '' }, today, sigPass: await sigPass(c), settings: publicSettings(st), assets: await assetsOut(c.D, st, await sigPass(c)),
       blanks, sheets, materials,
       // auditors and approvers read the training section: test names only (no questions or answer keys), no groups
       tests: S.can(c.user.role, 'library') ? tests : tests.map(({ questions, proposal, ...x }) => ({ ...x, questions: [], nQuestions: (questions || []).length })),
@@ -138,6 +133,8 @@ export const systemRoutes = {
     if (b.fbRequired !== undefined) st.fbRequired = bool(b.fbRequired);
     if (b.certCompany !== undefined) st.certCompany = bool(b.certCompany);
     if (b.forcePw !== undefined) { need(S.can(c.user.role, 'users'), 'forbidden', 403); st.forcePw = bool(b.forcePw); }
+    // certificates for the portals drawn on the server (needs the Workers Paid plan: DEPLOY.md 3d). Off: the owner's browser draws them
+    if (b.serverCerts !== undefined && bool(b.serverCerts) !== !!st.serverCerts) { need(S.can(c.user.role, 'users'), 'forbidden', 403); st.serverCerts = bool(b.serverCerts); await audit(c, 'settings.serverCerts', st.serverCerts ? 'on' : 'off'); }
     if (b.mfa !== undefined) { need(S.can(c.user.role, 'users'), 'forbidden', 403); st.mfa = ['off', 'admins', 'all'].includes(b.mfa) ? b.mfa : 'off'; }
     if (b.remind) { const r = b.remind; st.remind = { on: bool(r.on), days: [...new Set((r.days || []).map(Number))].filter(d => Number.isInteger(d) && d > 0 && d <= 365).sort((a, z) => z - a).slice(0, 4), toCompany: r.toCompany !== false, toTrainee: r.toTrainee !== false }; }
     if (b.approvals) { need(S.can(c.user.role, 'users'), 'forbidden', 403); st.approvals = S.approvalsCfg({ approvals: b.approvals }); }   // superadmin decides what needs approval
@@ -161,14 +158,14 @@ export const systemRoutes = {
       for (const x of await c.D.all('sigs')) if (x.data.on) { x.data.on = false; await c.D.put('sigs', [x]); }
       const id = 'g' + Date.now(); await c.D.put('sigs', [{ id, data: { id, key, at: new Date(c.now()).toISOString(), on: true } }]);
     } else { const st = await getSettings(c.D); if (kind === 'accred') st.accred = [...accredKeys(st), key]; else st[kind] = key; await c.D.put('settings', [{ id: 'main', data: st }]); }
-    await audit(c, 'upload', kind); return J({ ok: 1, assets: await assetsOut(c.D, await getSettings(c.D)) });
+    await audit(c, 'upload', kind); return J({ ok: 1, assets: await assetsOut(c.D, await getSettings(c.D), await sigPass(c)) });
   } },
   'POST /asset/remove': { auth: 'staff', act: 'settings.save', async fn(c) {
     const b = await c.body(), st = await getSettings(c.D);
     if (b.kind === 'accredDefault') delete st.accred;          // back to the seven logos of the sample certificate
     else if (b.kind === 'accred') { st.accred = [...accredKeys(st)]; st.accred.splice(Number(b.i), 1); }
     else if (b.kind === 'accredMove') { st.accred = [...accredKeys(st)]; const i = Number(b.i), j = i + (Number(b.dir) < 0 ? -1 : 1); if (st.accred[i] && st.accred[j]) [st.accred[i], st.accred[j]] = [st.accred[j], st.accred[i]]; } else if (b.kind === 'logo' || b.kind === 'stamp') delete st[b.kind]; else throw new H(400, 'badInput');
-    await c.D.put('settings', [{ id: 'main', data: st }]); await audit(c, 'asset.remove', b.kind); return { assets: await assetsOut(c.D, st) };
+    await c.D.put('settings', [{ id: 'main', data: st }]); await audit(c, 'asset.remove', b.kind); return { assets: await assetsOut(c.D, st, await sigPass(c)) };
   } },
 
   /* ---------------------------------------------------------------- seed */
@@ -277,21 +274,65 @@ export const systemRoutes = {
     const l = await listBackups(c); if (l[0] && c.now() - Date.parse(l[0].at) < 864e5) return { skipped: 1 };
     const key = await makeBackup(c); for (const o of l.slice(89)) await c.B.delete(o.key); return { key };
   } },
+  /* Download. A .kvb backup comes as it is stored (encrypted: safe to keep anywhere, restorable by uploading it here).
+     ?plain=1 gives the readable text instead - for a copy that does not depend on the secret key. It is recorded. */
   'GET /backup/get': { auth: 'staff', act: 'backup.download', raw: true, async fn(c) {
-    const k = c.url.searchParams.get('key') || ''; need(goodKey(k), 'badInput'); const o = await c.B.get(k); need(o, 'noRec', 404);
-    return new Response(o.body, { headers: { 'content-type': 'application/json', 'content-disposition': 'attachment; filename="' + k.split('/')[1] + '"' } });
+    const k = c.url.searchParams.get('key') || '', plain = c.url.searchParams.get('plain') === '1', name = k.split('/')[1]; need(goodKey(k), 'badInput');
+    if (k.endsWith('.json') || !plain) { const o = await c.B.get(k); need(o, 'noRec', 404); return new Response(o.body, { headers: { 'content-type': k.endsWith('.json') ? 'application/json' : 'application/octet-stream', 'content-disposition': 'attachment; filename="' + name + '"' } }); }
+    need(await c.B.head(k), 'noRec', 404); need(await keyFits(c, k), 'backupKey', 409);
+    await audit(c, 'backup.download.plain', k);
+    const it = opened(c.env, (await c.B.get(k)).body)[Symbol.asyncIterator]();
+    return new Response(new ReadableStream({ async pull(ctl) { try { const r = await it.next(); if (r.done) ctl.close(); else ctl.enqueue(r.value); } catch (e) { ctl.error(e); } } }),
+      { headers: { 'content-type': 'text/plain; charset=utf-8', 'content-disposition': 'attachment; filename="' + name.replace(/\.kvb$/, '.ndjson') + '"' } });
   } },
+  /* A backup file from outside (the weekly copy kept on a company drive) is put back among the backups, from where it can be
+     restored like any other. Accepted: an encrypted .kvb of this installation, the readable text copy (it is encrypted on
+     the way in), or a .json backup made before v3.36. Encrypted and text copies are read through completely before they are
+     accepted. */
+  'POST /backup/upload': { auth: 'staff', act: 'backup.restore', raw: true, async fn(c) {
+    const stamp = new Date(c.now()).toISOString().replace(/[:.]/g, '-'), rd = c.req.body?.getReader(); need(rd, 'badInput');
+    let head = new Uint8Array(0); while (head.length < 64) { const r = await rd.read(); if (r.done) break; const u = new Uint8Array(head.length + r.value.length); u.set(head); u.set(r.value, head.length); head = u; }
+    need(head.length >= 12, 'badFile');
+    const rest = async function* () { yield head; for (;;) { const r = await rd.read(); if (r.done) return; yield r.value; } };
+    const txt = new TextDecoder().decode(head.subarray(0, 64)), kind = txt.startsWith('KVB1') ? 'kvb' : /^\s*\{"kvet":"backup"/.test(txt) ? 'text' : /^\s*\{/.test(txt) ? 'json' : '';
+    need(kind, 'badFile');
+    const key = `backups/kvet-${stamp}-uploaded.${kind === 'json' ? 'json' : 'kvb'}`, out = r2Sink(c.B, key, { httpMetadata: { contentType: kind === 'json' ? 'application/json' : 'application/octet-stream' } });
+    try {
+      if (kind === 'text') { const w = await sealer(c.env, out); for await (const b of rest()) await w.bytes(b); await w.end(); }
+      else for await (const b of rest()) await out.write(b);
+      await out.close();
+      const info = kind === 'json' ? null : await checkBackup(c, key);                // wrong key, cut off, damaged: refused here, not on the day it is needed
+      await audit(c, 'backup.upload', `${key}${info ? ` · ${info.total} records of ${info.at}` : ''}`);
+      return J({ key, ...(info || {}) });
+    } catch (e) { await out.abort(); await c.B.delete(key).catch(() => {}); throw e; }
+  } },
+  /* Reads a backup through (decrypts, parses, counts) without changing anything: "would this one restore?" */
+  'POST /backup/verify': { auth: 'staff', act: 'backup.view', async fn(c) {
+    const b = await c.body(); need(goodKey(b.key) && b.key.endsWith('.kvb'), 'badInput'); need(await c.B.head(b.key), 'noRec', 404); need(await keyFits(c, b.key), 'backupKey', 409);
+    return { key: b.key, ...(await checkBackup(c, b.key)) };
+  } },
+  /* records and checksum per collection - compared before a wipe and after the restore in a drill (tools/restore-drill.mjs) */
+  'GET /backup/fingerprint': { auth: 'staff', act: 'backup.restore', async fn(c) { return { at: new Date(c.now()).toISOString(), list: await c.D.fingerprint() }; } },
   'POST /backup/delete': { auth: 'staff', act: 'backup.delete', async fn(c) { const b = await c.body(); need(goodKey(b.key), 'badInput'); await c.B.delete(b.key); await audit(c, 'backup.delete', b.key); return { ok: 1 }; } },
   'POST /restore': { auth: 'staff', act: 'backup.restore', async fn(c) {
-    const b = await c.body(); need(goodKey(b.key), 'badInput'); const o = await c.B.get(b.key); need(o, 'noRec', 404); const d = await o.json();
-    need(d?.cols, 'badInput');
-    const before = await makeBackup(c, '-before-restore');
-    // one database transaction (see apply_restore in schema.sql): either everything is restored or nothing changes
-    await c.D.restore(RESTORE_COLS, d.cols, d.counters || []);
+    const b = await c.body(); need(goodKey(b.key), 'badInput'); need(await c.B.head(b.key), 'noRec', 404);
+    /** @type {any} */ let done;
+    if (b.key.endsWith('.json')) {
+      // a backup made before v3.36: one JSON object, read whole
+      const d = await (await c.B.get(b.key)).json(); need(d?.cols, 'badBackup', 422);
+      const before = await makeBackup(c, '-before-restore');
+      await c.D.restore(RESTORE_COLS, d.cols, d.counters || []); done = { before, rows: RESTORE_COLS.reduce((n, k) => n + (d.cols[k] || []).length, 0), audit: 0, assets: 0 };
+    } else {
+      need(await keyFits(c, b.key), 'backupKey', 409);
+      await checkBackup(c, b.key);                                 // read through first: a damaged file never gets as far as the safety backup
+      const before = await makeBackup(c, '-before-restore');
+      // rows are staged page by page; ONE database transaction then swaps them in (apply_restore): everything or nothing
+      done = { before, ...(await restoreFrom(c, lines(opened(c.env, (await c.B.get(b.key)).body)), RESTORE_COLS)) };
+    }
     const logins = await rebuildLogins(c); await rebuildFins(c);
-    await audit(c, 'backup.restore', `${b.key} · safety backup ${before} · ${logins} logins re-registered`); return { ok: 1, before };
+    await audit(c, 'backup.restore', `${b.key} · ${done.rows} records · safety backup ${done.before} · ${logins} logins re-registered${done.audit ? ` · ${done.audit} audit rows added` : ''}${done.assets ? ` · ${done.assets} files put back` : ''}`);
+    return { ok: 1, ...done };
   } },
-
   /* "Repair login registry" also repairs the ID/FIN register (claims left behind by a failed registration) */
   'POST /system/logins/repair': { auth: 'staff', act: 'backup.restore', async fn(c) { const n = await rebuildLogins(c), fins = await rebuildFins(c); await audit(c, 'logins.repair', `${n} logins · ID/FIN register: ${fins.removed} removed, ${fins.added} added${fins.shared ? `, ${fins.shared} shared by two people` : ''}`); return { count: n, fins }; } },
 
@@ -301,7 +342,12 @@ export const systemRoutes = {
     if (tasks.includes('backup')) {
       const l = await listBackups(c);
       if (l[0] && c.now() - Date.parse(l[0].at) < 20 * 36e5) out.backup = 'skipped';
-      else { out.backup = await makeBackup(c, '-auto'); for (const o of l.slice(89)) await c.B.delete(o.key); await audit(c, 'backup.auto', out.backup); }
+      else {
+        out.backup = await makeBackup(c, '-auto'); for (const o of l.slice(89)) await c.B.delete(o.key);
+        // an unread backup is a hope, not a backup: tonight's is read back, decrypted and counted straight away
+        try { const v = await checkBackup(c, out.backup); out.verified = v.total; await audit(c, 'backup.auto', `${out.backup} · verified, ${v.total} records`); }
+        catch (e) { out.verified = 'FAILED'; await audit(c, 'backup.bad', `${out.backup} · ${String(/** @type {any} */ (e)?.message || e).slice(0, 120)}`); await notify(c, (await c.D.all('staff')).filter(r => r.data.role === 'superadmin').map(r => 'staff:u:' + r.id), 'nBackupBad', [], '#/system'); }
+      }
     }
     if (tasks.includes('reminders')) out.reminders = await runReminders(c);
     if (tasks.includes('retention')) out.retention = await runRetention(c);
@@ -364,7 +410,7 @@ export const systemRoutes = {
   'GET /staff/mfa': { auth: 'staff', mfa: 'skip', async fn(c) {
     const st = await getSettings(c.D), pol = st.mfa || 'off';
     const me = (await c.D.get('staff', c.user.id)) || /** @type {import('../../types/records').StaffRecord} */ ({});
-    return { name: me.name || '', title: me.title || '', sigImg: me.sigKey ? '/api/asset/' + me.sigKey : '', canSignCerts: S.can(c.user.role, 'cert.sign'), enabled: c.user.mfa, aal: c.user.aal, required: pol === 'all' || (pol === 'admins' && S.RANK[c.user.role] >= S.RANK.admin) };
+    return { name: me.name || '', title: me.title || '', sigImg: me.sigKey ? '/api/asset/' + me.sigKey + '?s=' + await sigPass(c) : '', canSignCerts: S.can(c.user.role, 'cert.sign'), enabled: c.user.mfa, aal: c.user.aal, required: pol === 'all' || (pol === 'admins' && S.RANK[c.user.role] >= S.RANK.admin) };
   } },
   /* Setting up two-factor works with a one-factor session ONLY while the account has none yet. Once it is on, adding another
      authenticator needs a session that passed the existing one - otherwise the password alone would be enough to add a
@@ -413,7 +459,7 @@ export const systemRoutes = {
     const buf = await c.req.arrayBuffer(); need(buf.byteLength && buf.byteLength <= 2e6 && png(buf), 'badFile');
     const key = rnd(8) + '.png'; await c.B.put('assets/' + key, buf, { httpMetadata: { contentType: 'image/png' } });
     const s = await ownStaff(c); s.sigKey = key; await c.D.put('staff', [{ id: c.user.id, data: s }]); await audit(c, 'signature.upload', s.name || c.user.email);
-    return J({ img: '/api/asset/' + key });
+    return J({ img: '/api/asset/' + key + '?s=' + await sigPass(c) });
   } },
   'POST /staff/signature/remove': { auth: 'staff', act: 'cert.sign', async fn(c) { const s = await ownStaff(c); delete s.sigKey; await c.D.put('staff', [{ id: c.user.id, data: s }]); await audit(c, 'signature.remove', s.name || c.user.email); return { ok: 1 }; } },
   'POST /staff/mfa/disable': { auth: 'staff', async fn(c) {
@@ -431,9 +477,23 @@ export const systemRoutes = {
   } },
 
   /* Audit trail: filters by date range, user, category and free text. Rows are read per month (their ids start with the timestamp). */
+  /* The audit page. The filtering, the counts per category, the list of people and the one page of rows that is shown are
+     computed IN the database (schema.sql: audit_page) over the id range of the period - ids begin with the time, so that
+     is an index range, and only one page of rows travels. Before v3.36 whole months were loaded into memory for every
+     page. The in-memory code below remains for the test store and for a database where schema.sql has not been run yet;
+     both follow the same rules (AUDIT_CATS, the same fields searched). */
   'GET /audit': { auth: 'staff', act: 'audit.view', async fn(c) {
     const q = c.url.searchParams, from = str(q.get('from'), 10), to = str(q.get('to'), 10), user = str(q.get('user'), 120).toLowerCase(), cat = str(q.get('cat'), 20), text = str(q.get('q'), 100).toLowerCase(), entity = str(q.get('entity'), 120);
     const lim = num(q.get('limit'), 1, 500, 100), off = num(q.get('offset'), 0, 1e6, 0);
+    const monthsAgo = n => { const d = new Date(c.now()); d.setUTCDate(1); d.setUTCMonth(d.getUTCMonth() - n); return d.toISOString().slice(0, 7); };
+    const dated = S.isDate(from) || S.isDate(to), recentOnly = !entity && !dated;
+    if (c.D.auditPage) {
+      // period as id bounds: Baku days when given; else the last 3 calendar months (a record's history: all time by its
+      // index, plus text mentions in the last 4 months)
+      const lo = S.isDate(from) ? bakuDayStart(from) : dated ? '' : monthsAgo(entity ? 3 : 2), hi = S.isDate(to) ? bakuDayEnd(to) : '';
+      const r = await c.D.auditPage({ lo, hi, user, cat, text, entity, history: !!entity && !dated, lim, off, cats: AUDIT_CATS });
+      if (r) return { total: r.total, cats: r.cats || {}, users: r.users || [], list: r.list || [], recentOnly };
+    }
     let rows;
     if (entity && !S.isDate(from) && !S.isDate(to)) {
       // one record's history: indexed lookup + text mentions in the last 90 days (rows written before the index existed)
@@ -442,7 +502,7 @@ export const systemRoutes = {
       const seen = new Set(); rows = [...byId.rows, ...months.flat()].filter(r => !seen.has(r.id) && seen.add(r.id));
     } else if (S.isDate(from) || S.isDate(to)) {
       // rows are stored under their UTC month; the first hours of a Baku day belong to the day before in UTC
-      const a = daysBefore(S.isDate(from) ? from : '2000-01-02', 1), z = S.isDate(to) ? to : c.today(), months = [];
+      const z = S.isDate(to) ? to : c.today(), a = daysBefore(S.isDate(from) ? from : daysBefore(z, 1800), 1), months = [];      // only "to" given: the five years before it (it used to start in 2000 and stop after 60 months, showing nothing)
       for (let y = Number(a.slice(0, 4)), m = Number(a.slice(5, 7)); `${y}-${S.pad(m)}` <= z.slice(0, 7) && months.length < 60; m++) { if (m > 12) { m = 1; y++; } months.push(`${y}-${S.pad(m)}`); }
       rows = (await Promise.all(months.map(p => c.D.prefix('audit', p)))).flat();        // months in parallel
     } else {

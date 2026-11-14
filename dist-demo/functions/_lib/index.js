@@ -85,7 +85,9 @@ function secure(res) {
       if (!route) throw new H(404, 'noRec');
       const now = deps.now || Date.now;
       const live = tracked(indexed(cached(deps.store(env))));
-      const c = { env, req: request, url, params, D: live.D, B: deps.bucket(env), A: deps.auth(env), now, today: () => S.bakuToday(now()), user: /** @type {any} */ (null), me: /** @type {any} */ (null),
+      /* a file of the site itself (fonts and built-in pictures for server-drawn PDFs); Pages gives them through env.ASSETS */
+      const files = deps.files ? deps.files(env) : async p => { const r = await env.ASSETS.fetch(new URL(p, url.origin)); if (!r.ok) throw new H(500, 'server'); return new Uint8Array(await r.arrayBuffer()); };
+      const c = { env, req: request, url, params, files, D: live.D, B: deps.bucket(env), A: deps.auth(env), now, today: () => S.bakuToday(now()), user: /** @type {any} */ (null), me: /** @type {any} */ (null),
         body: () => readJson(request) };
 
       /* opts.mfa: 'skip' = do not demand the second factor (sign-in / two-factor set-up routes) */

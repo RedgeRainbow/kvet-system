@@ -1,13 +1,13 @@
 import { mountPortal, topbar } from '../portal.js';
 import { api, setToken } from '../api.js';
 import * as S from '../shared.js';
-import { $, $$, esc, t, lang, toast, fail, openModal, badge, empty, busy, download, confirmDlg, errMsg } from '../ui.js';
+import { $, $$, esc, t, lang, toast, fail, openModal, badge, empty, busy, download, confirmDlg, errMsg, showPdf, dataUrl } from '../ui.js';
 import { certHtml, DOC_CSS, printHtml, htmlToPdf, certFile } from '../cert.js';
 import { live } from '../live.js';
+const scaled = (html, w) => `<div style="width:${w}px;max-width:100%;overflow:hidden"><div style="width:794px;transform-origin:0 0;transform:scale(${w / 794});height:${Math.round(1123 * w / 794)}px"><style>${DOC_CSS}</style>${html}</div></div>`;
 import { chatHtml } from '../chat.js';
 
 const K = 'trainee';
-const scaled = (html, w) => `<div style="width:${w}px;max-width:100%;overflow:hidden"><div style="width:794px;transform-origin:0 0;transform:scale(${w / 794});height:${Math.round(1123 * w / 794)}px"><style>${DOC_CSS}</style>${html}</div></div>`;
 const lnk = u => (/^https?:\/\//i.test(u) ? u : '#');
 
 mountPortal({ kind: K, titleKey: 'portalTrainee', bodyClass: 'trainee', async boot({ app, rerender }) {
@@ -23,7 +23,7 @@ mountPortal({ kind: K, titleKey: 'portalTrainee', bodyClass: 'trainee', async bo
   const factCard = c => `<div class="card"><div class="row"><div><b>📜 ${esc(c.training)}</b><div class="mute sm">${esc(t('certHeld'))}</div></div><span class="grow"></span>${badge(c.st, t('cs_' + c.st))}</div>
     <div class="mute sm" style="margin-top:6px">${esc(S.fmtDate(c.start))} · ${esc(t('valid'))}: <b>${esc(S.fmtDate(c.expiry))}</b></div></div>`;
   const certCard = c => c.fact ? factCard(c) : `<div class="card"><div class="row"><div><b class="mono">${esc(c.no)}</b><div class="mute sm">${esc(c.snap.blank?.name || '')}</div></div><span class="grow"></span>${badge(c.st, t('cs_' + c.st))}</div>
-    <div class="mute sm" style="margin:6px 0">${esc(S.fmtDate(c.start))} → ${esc(S.fmtDate(c.end))} · ${esc(t('valid'))}: <b>${esc(S.fmtDate(c.expiry))}</b></div><div class="row"><button class="btn sm" data-v="${esc(c.no)}">👁 ${esc(t('view'))}</button><button class="btn ghost sm" data-pdf="${esc(c.no)}">⬇ PDF</button><button class="btn ghost sm" data-pr="${esc(c.no)}">🖨 ${esc(t('print'))}</button></div></div>`;
+    <div class="mute sm" style="margin:6px 0">${esc(S.fmtDate(c.start))} → ${esc(S.fmtDate(c.end))} · ${esc(t('valid'))}: <b>${esc(S.fmtDate(c.expiry))}</b></div><div class="row"><button class="btn sm" data-v="${esc(c.no)}">👁 ${esc(t('view'))}</button><button class="btn ghost sm" data-pdf="${esc(c.no)}">⬇ PDF</button>${H.certPdf ? '' : `<button class="btn ghost sm" data-pr="${esc(c.no)}">🖨 ${esc(t('print'))}</button>`}</div></div>`;
   const fbForm = s => `<div class="card"><h2>${esc(t('feedbackTitle'))}</h2><p class="mute">${esc(s.blank?.name || '')}</p><p class="hint">${esc(t('feedbackHint'))}</p>
     ${S.FB_GROUPS.map(g => `<div class="fbq" data-g="${g}" style="margin:14px 0"><div class="b">${esc(t(g))}</div><div class="hint">${esc(t(g + 'h'))}</div><div class="rate">${Array.from({ length: 10 }, (_, i) => `<button type="button" class="btn ghost" data-r="${i + 1}">${i + 1}</button>`).join('')}</div><textarea rows="2" maxlength="2000" placeholder="${esc(g === 'g6' ? t('g6c') : t('comment'))}" data-cm></textarea></div>`).join('')}
     <p class="hint">✍ ${esc(t('fbSignNote'))}</p><div class="err" id="fe" role="alert"></div><button class="btn" id="fsend" data-sid="${esc(s.id)}">✍ ${esc(t('fbSubmitSign'))}</button></div>`;
@@ -241,12 +241,18 @@ mountPortal({ kind: K, titleKey: 'portalTrainee', bodyClass: 'trainee', async bo
       if (!ok) return ($('#fe').textContent = t('rateAll'));
       try { const d = await api('/portal/trainee/feedback', { kind: K, body: { sid: fs.dataset.sid, r, cm } }); flow = { sid: fs.dataset.sid, step: 'done', examLink: d.examLink }; draw(); } catch (/** @type {any} */ e) { $('#fe').textContent = t('server'); }
     });
-    $$('[data-v],[data-pdf],[data-pr]').forEach(b => (b.onclick = async () => {
-      const no = b.dataset.v || b.dataset.pdf || b.dataset.pr, c = H.certs.find(x => x.no === no), html = certHtml(c, H.assets, H.info);
-      if (b.dataset.pr) return printHtml(html, c.no);
-      if (b.dataset.pdf) return busy(b, async () => { try { download(await htmlToPdf(html), certFile(c)); } catch (/** @type {any} */ e) { fail(e); } });
-      openModal({ title: c.no, wide: true, html: scaled(html, Math.min(640, innerWidth - 70)), buttons: [{ label: '🖨 ' + t('print'), cls: 'ghost', fn: async () => { await printHtml(html, c.no); return false; } }, { label: '⬇ PDF', fn: async () => { try { download(await htmlToPdf(html), certFile(c)); } catch (/** @type {any} */ e) { fail(e); } return false; } }, { label: t('close'), cls: 'ghost', id: 'x' }] });
-    }));
+    /* Settings -> certificates drawn on the server. On: this page shows the server's PDF and never receives the signature
+       picture. Off (Workers Free plan): the page draws the certificate and asks for the picture with its sign-in. */
+    $$('[data-v],[data-pdf],[data-pr]').forEach(b => (b.onclick = () => busy(b, async () => {
+      const no = b.dataset.v || b.dataset.pdf || b.dataset.pr, c = H.certs.find(x => x.no === no), q = '?no=' + encodeURIComponent(no);
+      try {
+        if (H.certPdf) { const blob = await api('/portal/trainee/cert.pdf' + q, { kind: K, blob: true }); return b.dataset.pdf ? download(blob, certFile(c)) : showPdf({ title: c.no, blob, name: certFile(c) }); }
+        const html = certHtml(c.sigPic ? { ...c, sigData: await dataUrl(await api('/portal/trainee/cert/sig' + q, { kind: K, blob: true })) } : c, H.assets, H.info);
+        if (b.dataset.pr) return printHtml(html, c.no);
+        if (b.dataset.pdf) return download(await htmlToPdf(html), certFile(c));
+        openModal({ title: c.no, wide: true, html: scaled(html, Math.min(640, innerWidth - 70)), buttons: [{ label: '🖨 ' + t('print'), cls: 'ghost', fn: async () => { await printHtml(html, c.no); return false; } }, { label: '⬇ PDF', fn: async () => { try { download(await htmlToPdf(html), certFile(c)); } catch (/** @type {any} */ e) { fail(e); } return false; } }, { label: t('close'), cls: 'ghost', id: 'x' }] });
+      } catch (/** @type {any} */ e) { fail(e); }
+    })));
   }
   draw();
   // live updates (attendance confirmed by the trainer, results, certificates); never while a form or the test is open
